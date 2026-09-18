@@ -54,7 +54,7 @@ class PauseRepository:
                 WHERE resumed_at IS NULL
                   AND start_at <= ?
                   AND scheduled_end_at >= ?
-                ORDER BY start_at DESC
+                ORDER BY start_at DESC, id DESC
                 LIMIT 1
                 """,
                 (now, now),
