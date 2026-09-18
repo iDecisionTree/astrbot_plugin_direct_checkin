@@ -118,3 +118,35 @@ def test_pause_active_resume_and_week_exemption(tmp_path: Path):
         assert exempt is not None and exempt.reason == "期中考试"
 
     asyncio.run(scenario())
+
+
+def test_reset_clears_checkin_data_but_keeps_admins(tmp_path: Path):
+    async def scenario() -> None:
+        db = Database(tmp_path / "checkin.db")
+        await db.initialize()
+        users = UserRepository(db)
+        submissions = SubmissionRepository(db)
+        admins = AdminRepository(db)
+        pauses = PauseRepository(db)
+
+        await admins.add("2747344390", "bootstrap", NOW)
+        user = await users.create("1001", "2026123456", "张三", None, NOW)
+        await _make_pending(submissions, user, "s1")
+        await admins.add_adjustment(user.id, "2025-12-29", 1, "2747344390", NOW)
+        await pauses.create("day", NOW, NOW, "维护", "2747344390", NOW)
+
+        counts = await db.reset_checkin_data()
+        assert counts["users"] == 1
+        assert counts["submissions"] == 1
+        assert counts["count_adjustments"] == 1
+        assert counts["pause_periods"] == 1
+
+        assert await users.list_users() == []
+        assert await submissions.list_submissions() == []
+        assert await admins.list_adjustments() == []
+        assert await pauses.list_pauses() == []
+        # 管理员表保留，避免重置后插件失管。
+        assert await admins.count() == 1
+        assert await admins.is_admin("2747344390") is True
+
+    asyncio.run(scenario())

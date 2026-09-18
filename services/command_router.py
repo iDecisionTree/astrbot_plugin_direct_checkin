@@ -20,6 +20,7 @@ class CommandName:
     RESUME = "resume"
     GET = "get"
     STAT = "stat"
+    RESET = "reset"
     UNKNOWN = "unknown"
 
 
@@ -48,6 +49,7 @@ class ParsedCommand:
             CommandName.RESUME,
             CommandName.GET,
             CommandName.STAT,
+            CommandName.RESET,
         }
 
 
@@ -98,6 +100,10 @@ def parse_command(raw_text: str) -> ParsedCommand:
 
     if head == "stat":
         return ParsedCommand(CommandName.STAT)
+
+    if head == "reset":
+        confirm = bool(rest) and rest[0].lower() == "confirm"
+        return ParsedCommand(CommandName.RESET, args=["confirm"] if confirm else [])
 
     # 绑定：/d <学号> <名字>
     if _DIGITS.match(tokens[0]):

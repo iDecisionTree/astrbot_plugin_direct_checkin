@@ -182,6 +182,25 @@ def resume_none() -> str:
     return "现在没有生效中的暂停呀，不用恢复。"
 
 
+def reset_confirm_required() -> str:
+    return (
+        "重置会清空所有用户绑定、打卡提交、人工调整、暂停记录与审计日志，"
+        "但不会删除归档目录里的 Word 文件。\n"
+        "确认要重置请发送：/d reset confirm"
+    )
+
+
+def reset_done(users: int, submissions: int, adjustments: int, pauses: int) -> str:
+    return (
+        f"重置完成：已清除 {users} 名用户、{submissions} 条提交、"
+        f"{adjustments} 条人工调整、{pauses} 条暂停记录。Word 文件未删除。"
+    )
+
+
+def reset_failed() -> str:
+    return "重置没成功呀，词九已经把异常记下来了。数据未被清空。"
+
+
 def unknown_command(is_admin: bool = False) -> str:
     if is_admin:
         return "这个子命令词九不认识呢。发 /d admin help 看看管理员命令吧。"
@@ -217,7 +236,8 @@ def admin_help() -> str:
         "/d skip w [原因]      暂停本周\n"
         "/d resume             恢复接收\n"
         "/d get [学号/QQ]      导出 Excel\n"
-        "/d stat               当前周统计"
+        "/d stat               当前周统计\n"
+        "/d reset              重置所有打卡数据（需 /d reset confirm）"
     )
 
 

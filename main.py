@@ -120,6 +120,7 @@ class DirectCheckinPlugin(Star):
             submission_repo=self.submission_repo,
             pause_repo=self.pause_repo,
             audit_repo=self.audit_repo,
+            db=self.db,
             weekly_limit=self.weekly_limit,
             timezone=self.timezone,
         )
@@ -270,6 +271,11 @@ class DirectCheckinPlugin(Star):
 
         if command.name == CommandName.RESUME:
             yield event.plain_result(await self.admin_service.resume(qq, message_id))
+            return
+
+        if command.name == CommandName.RESET:
+            confirm = bool(command.args)
+            yield event.plain_result(await self.admin_service.reset(qq, confirm, message_id))
             return
 
         if command.name == CommandName.GET:

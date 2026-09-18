@@ -43,6 +43,16 @@ def test_add_remove_get_stat():
     assert parse_command("/d stat").name == CommandName.STAT
 
 
+def test_reset():
+    plain = parse_command("/d reset")
+    assert plain.name == CommandName.RESET
+    assert plain.args == []
+    confirmed = parse_command("/d reset confirm")
+    assert confirmed.name == CommandName.RESET
+    assert confirmed.args == ["confirm"]
+    assert parse_command("/d reset yes").args == []
+
+
 def test_unknown_subcommands():
     assert parse_command("/d 开挂").name == CommandName.UNKNOWN
     assert parse_command("/d addx 123").name == CommandName.UNKNOWN

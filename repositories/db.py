@@ -185,6 +185,39 @@ class Database:
 
         return await asyncio.to_thread(work)
 
+    async def reset_checkin_data(self) -> dict[str, int]:
+        """清空全部打卡相关数据，但保留管理员表与 NAS 文件。
+
+        按外键依赖顺序删除；同时重置自增序列。
+        返回各表删除的行数。
+        """
+
+        tables = (
+            "submissions",
+            "count_adjustments",
+            "pause_periods",
+            "audit_log",
+            "users",
+        )
+
+        def work(conn: sqlite3.Connection) -> dict[str, int]:
+            result: dict[str, int] = {}
+            for table in tables:
+                cursor = conn.execute(f"DELETE FROM {table}")  # noqa: S608 - 表名为固定白名单
+                result[table] = cursor.rowcount
+            try:
+                placeholders = ", ".join("?" for _ in tables)
+                conn.execute(
+                    f"DELETE FROM sqlite_sequence WHERE name IN ({placeholders})",
+                    tables,
+                )
+            except sqlite3.OperationalError:
+                # 尚未产生自增记录时 sqlite_sequence 可能不存在。
+                pass
+            return result
+
+        return await self.transaction(work, immediate=True)
+
     async def transaction(
         self,
         fn: Callable[[sqlite3.Connection], T],

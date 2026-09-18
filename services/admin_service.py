@@ -8,6 +8,7 @@ from ..models.entities import User
 from ..models.enums import PauseScope
 from ..repositories.admin_repo import AdminRepository
 from ..repositories.audit_repo import AuditRepository
+from ..repositories.db import Database
 from ..repositories.pause_repo import PauseRepository
 from ..repositories.submission_repo import SubmissionRepository
 from ..repositories.user_repo import UserRepository
@@ -32,6 +33,7 @@ class AdminService:
         submission_repo: SubmissionRepository,
         pause_repo: PauseRepository,
         audit_repo: AuditRepository,
+        db: Database,
         weekly_limit: int,
         timezone: str,
     ) -> None:
@@ -40,6 +42,7 @@ class AdminService:
         self.submission_repo = submission_repo
         self.pause_repo = pause_repo
         self.audit_repo = audit_repo
+        self.db = db
         self.weekly_limit = max(1, weekly_limit)
         self.timezone = timezone
 
@@ -128,6 +131,43 @@ class AdminService:
         )
         await self._audit(actor_qq, "pause", scope, message_id, "ok", now)
         return T.skip_ok(scope, reason)
+
+    async def reset(self, actor_qq: str, confirm: bool, message_id: str) -> str:
+        """重置所有打卡数据（用户绑定、提交、人工调整、暂停、审计）。
+
+        仅清理数据库，绝不删除 NAS 归档文件；管理员表保留，避免插件失管。
+        """
+
+        if not confirm:
+            return T.reset_confirm_required()
+        try:
+            counts = await self.db.reset_checkin_data()
+        except Exception:  # noqa: BLE001 - 重置失败不得静默
+            await self._audit(
+                actor_qq,
+                "reset_all",
+                "database",
+                message_id,
+                "failed",
+                utc_iso(now_utc()),
+                target_type="system",
+            )
+            return T.reset_failed()
+        await self._audit(
+            actor_qq,
+            "reset_all",
+            "database",
+            message_id,
+            "ok",
+            utc_iso(now_utc()),
+            target_type="system",
+        )
+        return T.reset_done(
+            counts.get("users", 0),
+            counts.get("submissions", 0),
+            counts.get("count_adjustments", 0),
+            counts.get("pause_periods", 0),
+        )
 
     async def resume(self, actor_qq: str, message_id: str) -> str:
         now = utc_iso(now_utc())
