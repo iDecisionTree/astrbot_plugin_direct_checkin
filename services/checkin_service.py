@@ -29,7 +29,7 @@ from ..repositories.user_repo import UserRepository
 from ..utils import response_templates as T
 from ..utils.time_utils import now_utc, parse_iso, to_beijing, utc_iso, week_key_of
 from .ai_review_service import AIReviewOutcome, AIReviewService
-from .docx_parser import evidence_text, extract_content, text_for_ai
+from .docx_parser import DocxParseError, evidence_text, extract_content, text_for_ai
 from .duplicate_service import DuplicateResult, DuplicateService
 from .file_service import FileService, FileServiceError, StoredFile, locate_replied_file
 
@@ -209,7 +209,22 @@ class CheckinService:
             )
 
         # 2) 提取正文与证据
-        content = await asyncio.to_thread(extract_content, Path(stored.path))
+        try:
+            content = await asyncio.to_thread(extract_content, Path(stored.path))
+        except DocxParseError as exc:
+            await self.submission_repo.update(
+                submission.id,
+                status=SubmissionStatus.REJECTED_FILE.value,
+                error_code=ErrorCode.DOCX_PARSE_FAILED,
+                error_message=str(exc),
+                updated_at=now_iso,
+            )
+            await self._audit(user, "checkin", submission.id, "docx_parse_failed", now_iso)
+            return CheckinResult(
+                CheckinOutcome.FILE_ERROR,
+                T.docx_parse_failed(),
+                SubmissionStatus.REJECTED_FILE.value,
+            )
         await self.submission_repo.update(
             submission.id,
             normalized_text_sha256=self._text_hash(content.text),
