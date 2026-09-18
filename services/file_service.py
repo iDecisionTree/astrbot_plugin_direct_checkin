@@ -168,6 +168,51 @@ class FileService:
             name = "document.docx"
         return sanitize_filename(name)
 
+    async def purge_all(self) -> dict[str, int]:
+        """删除归档根目录下的全部文件与空子目录，保留根目录本身。
+
+        全程不跟随符号链接，确保不会越出 ``nas_base_dir``。
+        返回 {"files", "dirs", "errors"} 计数。
+        """
+
+        base = self.nas_base_dir
+        base_resolved = base.resolve()
+
+        def work() -> dict[str, int]:
+            stats = {"files": 0, "dirs": 0, "errors": 0}
+            if not base.is_dir():
+                return stats
+            # topdown=False：先删文件，再自底向上删空目录。
+            for root, dirs, files in os.walk(base, topdown=False, followlinks=False):
+                root_path = Path(root)
+                for name in files:
+                    target = root_path / name
+                    try:
+                        target.unlink()
+                        stats["files"] += 1
+                    except OSError:
+                        stats["errors"] += 1
+                for name in dirs:
+                    target = root_path / name
+                    # 符号链接目录：仅删除链接本身，绝不进入或删除其目标。
+                    if target.is_symlink():
+                        try:
+                            target.unlink()
+                            stats["dirs"] += 1
+                        except OSError:
+                            stats["errors"] += 1
+                        continue
+                    try:
+                        if target.resolve() != base_resolved:
+                            target.rmdir()
+                            stats["dirs"] += 1
+                    except OSError:
+                        # 目录非空（例如删除失败残留）时保留。
+                        pass
+            return stats
+
+        return await asyncio.to_thread(work)
+
     async def cleanup_temp(self, stored: StoredFile) -> None:
         """清理适配器下载产生的临时文件（仅限 AstrBot 临时目录内）。"""
 

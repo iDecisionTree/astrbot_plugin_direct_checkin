@@ -185,20 +185,28 @@ def resume_none() -> str:
 def reset_confirm_required() -> str:
     return (
         "重置会清空所有用户绑定、打卡提交、人工调整、暂停记录与审计日志，"
-        "但不会删除归档目录里的 Word 文件。\n"
-        "确认要重置请发送：/d reset confirm"
+        "并删除归档目录里的全部 Word 文件。\n"
+        "确认要重置请发送：/d reset confirm（需连续发送两次）"
     )
 
 
-def reset_done(users: int, submissions: int, adjustments: int, pauses: int) -> str:
+def reset_confirm_again() -> str:
+    return "词九再确认一次：真的要重置吗？请再次发送 /d reset confirm。"
+
+
+def reset_done(users: int, submissions: int, adjustments: int, pauses: int, files: int) -> str:
     return (
         f"重置完成：已清除 {users} 名用户、{submissions} 条提交、"
-        f"{adjustments} 条人工调整、{pauses} 条暂停记录。Word 文件未删除。"
+        f"{adjustments} 条人工调整、{pauses} 条暂停记录，并删除 {files} 个归档文件。"
     )
 
 
 def reset_failed() -> str:
     return "重置没成功呀，词九已经把异常记下来了。数据未被清空。"
+
+
+def admin_super_protected() -> str:
+    return "没改成功：这是配置里的超级管理员，不能被移除。数据没有被修改。"
 
 
 def unknown_command(is_admin: bool = False) -> str:

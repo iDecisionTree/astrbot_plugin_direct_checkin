@@ -121,8 +121,10 @@ class DirectCheckinPlugin(Star):
             pause_repo=self.pause_repo,
             audit_repo=self.audit_repo,
             db=self.db,
+            file_service=self.file_service,
             weekly_limit=self.weekly_limit,
             timezone=self.timezone,
+            super_admin_qq=cfg.get_str(self.config, "bootstrap_admin_qq", "").strip(),
         )
         self.export_service = ExportService(
             user_repo=self.user_repo,
@@ -168,13 +170,17 @@ class DirectCheckinPlugin(Star):
             )
 
     async def _bootstrap_admin(self) -> None:
+        """确保配置中的超级管理员始终存在（不可被移除）。"""
+
         bootstrap_qq = cfg.get_str(self.config, "bootstrap_admin_qq", "").strip()
         if not bootstrap_qq:
             return
-        if await self.admin_repo.count() > 0:
+        if not bootstrap_qq.isdigit():
+            self.logger.warning("bootstrap_admin_qq 不是纯数字，已跳过超级管理员初始化")
             return
-        await self.admin_repo.add(bootstrap_qq, "bootstrap", utc_iso(now_utc()))
-        self.logger.info("已写入初始管理员")
+        inserted = await self.admin_repo.add(bootstrap_qq, "bootstrap", utc_iso(now_utc()))
+        if inserted:
+            self.logger.info("已写入超级管理员")
 
     async def _recover_pending(self) -> None:
         pending = await self.submission_repo.list_by_status(SubmissionStatus.PENDING.value)

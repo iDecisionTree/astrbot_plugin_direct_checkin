@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 
 from ..models.entities import User
 from ..models.enums import PauseScope
@@ -20,8 +21,12 @@ from ..utils.time_utils import (
     week_end_beijing,
     week_key_now,
 )
+from .file_service import FileService
 
 _DIGITS = re.compile(r"^\d+$")
+
+#: 重置二次确认的有效期（秒）。
+_RESET_CONFIRM_TTL = 120
 
 
 class AdminService:
@@ -34,8 +39,10 @@ class AdminService:
         pause_repo: PauseRepository,
         audit_repo: AuditRepository,
         db: Database,
+        file_service: FileService,
         weekly_limit: int,
         timezone: str,
+        super_admin_qq: str = "",
     ) -> None:
         self.admin_repo = admin_repo
         self.user_repo = user_repo
@@ -43,8 +50,11 @@ class AdminService:
         self.pause_repo = pause_repo
         self.audit_repo = audit_repo
         self.db = db
+        self.file_service = file_service
         self.weekly_limit = max(1, weekly_limit)
         self.timezone = timezone
+        self.super_admin_qq = (super_admin_qq or "").strip()
+        self._reset_pending: dict[str, float] = {}
 
     async def is_admin(self, qq: str) -> bool:
         return await self.admin_repo.is_admin(qq)
@@ -66,6 +76,16 @@ class AdminService:
             return T.admin_op_failed("QQ 号必须是纯数字")
         if not await self.admin_repo.is_admin(target_qq):
             return T.admin_not_found_admin(target_qq)
+        if self.super_admin_qq and target_qq == self.super_admin_qq:
+            await self._audit(
+                actor_qq,
+                "admin_remove",
+                target_qq,
+                message_id,
+                "super_protected",
+                utc_iso(now_utc()),
+            )
+            return T.admin_super_protected()
         if await self.admin_repo.count() <= 1:
             await self._audit(
                 actor_qq, "admin_remove", target_qq, message_id, "last_one", utc_iso(now_utc())
@@ -135,13 +155,24 @@ class AdminService:
     async def reset(self, actor_qq: str, confirm: bool, message_id: str) -> str:
         """重置所有打卡数据（用户绑定、提交、人工调整、暂停、审计）。
 
-        仅清理数据库，绝不删除 NAS 归档文件；管理员表保留，避免插件失管。
+        需要连续两次 /d reset confirm 才会执行；会同时删除 NAS 归档文件，
+        但保留管理员表，避免插件失管。
         """
 
+        now_monotonic = time.monotonic()
+        pending_at = self._reset_pending.get(actor_qq)
         if not confirm:
+            self._reset_pending.pop(actor_qq, None)
             return T.reset_confirm_required()
+        if pending_at is None or now_monotonic - pending_at > _RESET_CONFIRM_TTL:
+            self._reset_pending[actor_qq] = now_monotonic
+            return T.reset_confirm_again()
+
+        # 第二次 confirm：真正执行。
+        self._reset_pending.pop(actor_qq, None)
         try:
             counts = await self.db.reset_checkin_data()
+            file_stats = await self.file_service.purge_all()
         except Exception:  # noqa: BLE001 - 重置失败不得静默
             await self._audit(
                 actor_qq,
@@ -167,6 +198,7 @@ class AdminService:
             counts.get("submissions", 0),
             counts.get("count_adjustments", 0),
             counts.get("pause_periods", 0),
+            file_stats.get("files", 0),
         )
 
     async def resume(self, actor_qq: str, message_id: str) -> str:

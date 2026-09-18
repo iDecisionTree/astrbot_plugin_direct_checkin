@@ -261,17 +261,24 @@ SELECT week_key,status,counted,counted_slot FROM submissions ORDER BY submitted_
 | 8.8 参数非法 | `/d admin add abc` | `没改成功：QQ 号必须是纯数字。…` |
 | 8.9 人工 -1 到 0 | 当前周有效计次为 0 时 `/d remove <学号>` | `没改成功：当前周计次已经是 0…` |
 | 8.10 不篡改原记录 | 执行 add/remove 后查 `submissions` | 原提交与 AI 结果未被修改 |
-| 8.11 重置需确认 | 管理员发 `/d reset` | 返回确认提示，数据未变化 |
-| 8.12 执行重置 | `/d reset confirm` | `重置完成：已清除 …`，`users`/`submissions` 清空 |
-| 8.13 文件保留 | 重置后检查 `/srv/checkin_test/<学号>/` | Word 文件仍存在，未被删除 |
-| 8.14 管理员保留 | 重置后 `/d admin help`、`/d admin add` | 仍可执行，管理员表未清空 |
-| 8.15 普通用户不可重置 | 学员发 `/d reset confirm` | 无权限提示 |
+| 8.11 超级管理员不可移除 | `/d admin remove <bootstrap_admin_qq>` | `没改成功：这是配置里的超级管理员，不能被移除。`；仍是管理员 |
+| 8.12 重置第一步 | 管理员发 `/d reset` | 返回确认提示，数据未变化 |
+| 8.13 重置第二步 | `/d reset confirm` | `词九再确认一次：…请再次发送 /d reset confirm`，数据未变化 |
+| 8.14 重置执行 | 再次 `/d reset confirm` | `重置完成：已清除 … 并删除 N 个归档文件` |
+| 8.15 数据库清空 | 查 `users`/`submissions` | 均为 0 |
+| 8.16 NAS 文件删除 | 检查 `/srv/checkin_test/<学号>/` | Word 文件被删除，归档根目录保留 |
+| 8.17 管理员保留 | 重置后 `/d admin help`、`/d admin add` | 仍可执行，管理员表未清空 |
+| 8.18 普通用户不可重置 | 学员发 `/d reset confirm` | 无权限提示 |
 
 > 重置核对：
 > ```sql
 > SELECT COUNT(*) FROM users;        -- 期望 0
 > SELECT COUNT(*) FROM submissions;  -- 期望 0
 > SELECT COUNT(*) FROM admins;       -- 期望 >0（保留）
+> ```
+> ```bash
+> ls /srv/checkin_test/             # 期望目录存在
+> find /srv/checkin_test -type f    # 期望无文件
 > ```
 
 ---
