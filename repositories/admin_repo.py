@@ -57,16 +57,30 @@ class AdminRepository:
         delta: int,
         admin_qq: str,
         now: str,
+        beijing_date: str,
         reason: str | None = None,
+        counted: int = 0,
+        counted_slot: int | None = None,
     ) -> CountAdjustment:
         def work(conn: sqlite3.Connection) -> CountAdjustment:
             cursor = conn.execute(
                 """
                 INSERT INTO count_adjustments
-                    (user_id, week_key, delta, admin_qq, reason, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (user_id, week_key, delta, admin_qq, reason, created_at,
+                     beijing_date, counted, counted_slot)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, week_key, delta, admin_qq, reason, now),
+                (
+                    user_id,
+                    week_key,
+                    delta,
+                    admin_qq,
+                    reason,
+                    now,
+                    beijing_date,
+                    counted,
+                    counted_slot,
+                ),
             )
             row = conn.execute(
                 "SELECT * FROM count_adjustments WHERE id = ?", (cursor.lastrowid,)
@@ -74,6 +88,102 @@ class AdminRepository:
             return CountAdjustment.from_row(row)
 
         return await self.db.run(work)
+
+    async def allocate_positive_adjustment(
+        self,
+        user_id: int,
+        week_key: str,
+        beijing_date: str,
+        weekly_limit: int,
+        admin_qq: str,
+        now: str,
+        reason: str | None = None,
+    ) -> tuple[CountAdjustment, bool, int]:
+        """人工 +1：与自动打卡共享每周槽位。
+
+        本周仍有空槽则 ``counted=1``，否则记为额外。返回
+        (adjustment, counted, 本周有效计次)。
+        """
+
+        from .submission_repo import (
+            _count_counted_adjustments,
+            _count_counted_submissions,
+            _count_manual_negatives,
+        )
+
+        def work(conn: sqlite3.Connection) -> tuple[CountAdjustment, bool, int]:
+            auto_counted = _count_counted_submissions(conn, user_id, week_key)
+            manual_counted = _count_counted_adjustments(conn, user_id, week_key)
+            manual_negatives = _count_manual_negatives(conn, user_id, week_key)
+            current = max(0, auto_counted + manual_counted - manual_negatives)
+            if current < weekly_limit:
+                counted = 1
+                slot: int | None = current + 1
+                total = current + 1
+            else:
+                counted = 0
+                slot = None
+                total = current
+            cursor = conn.execute(
+                """
+                INSERT INTO count_adjustments
+                    (user_id, week_key, delta, admin_qq, reason, created_at,
+                     beijing_date, counted, counted_slot)
+                VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    week_key,
+                    admin_qq,
+                    reason,
+                    now,
+                    beijing_date,
+                    counted,
+                    slot,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM count_adjustments WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+            return CountAdjustment.from_row(row), bool(counted), total
+
+        return await self.db.transaction(work, immediate=True)
+
+    async def count_counted_in_week(self, user_id: int, week_key: str) -> int:
+        def work(conn: sqlite3.Connection) -> int:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM count_adjustments
+                WHERE user_id = ? AND week_key = ? AND counted = 1
+                """,
+                (user_id, week_key),
+            ).fetchone()
+            return int(row["c"]) if row else 0
+
+        return await self.db.fetch(work)
+
+    async def count_negatives_in_week(self, user_id: int, week_key: str) -> int:
+        def work(conn: sqlite3.Connection) -> int:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM count_adjustments
+                WHERE user_id = ? AND week_key = ? AND delta < 0
+                """,
+                (user_id, week_key),
+            ).fetchone()
+            return int(row["c"]) if row else 0
+
+        return await self.db.fetch(work)
+
+    async def sum_all_deltas(self, user_id: int) -> int:
+        def work(conn: sqlite3.Connection) -> int:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(delta), 0) AS total FROM count_adjustments WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            return int(row["total"]) if row else 0
+
+        return await self.db.fetch(work)
 
     async def sum_adjustments(self, user_id: int, week_key: str) -> int:
         def work(conn: sqlite3.Connection) -> int:
@@ -101,6 +211,34 @@ class AdminRepository:
                 (week_key,),
             ).fetchall()
             return {int(row["user_id"]): int(row["total"]) for row in rows}
+
+        return await self.db.fetch(work)
+
+    async def count_counted_by_week(self, week_key: str) -> dict[int, int]:
+        def work(conn: sqlite3.Connection) -> dict[int, int]:
+            rows = conn.execute(
+                """
+                SELECT user_id, COUNT(*) AS c FROM count_adjustments
+                WHERE week_key = ? AND counted = 1
+                GROUP BY user_id
+                """,
+                (week_key,),
+            ).fetchall()
+            return {int(row["user_id"]): int(row["c"]) for row in rows}
+
+        return await self.db.fetch(work)
+
+    async def count_negatives_by_week(self, week_key: str) -> dict[int, int]:
+        def work(conn: sqlite3.Connection) -> dict[int, int]:
+            rows = conn.execute(
+                """
+                SELECT user_id, COUNT(*) AS c FROM count_adjustments
+                WHERE week_key = ? AND delta < 0
+                GROUP BY user_id
+                """,
+                (week_key,),
+            ).fetchall()
+            return {int(row["user_id"]): int(row["c"]) for row in rows}
 
         return await self.db.fetch(work)
 

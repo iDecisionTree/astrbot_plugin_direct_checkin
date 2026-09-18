@@ -102,6 +102,10 @@ def checkin_extra() -> str:
     return "这次内容也通过啦～本周已经 2/2，词九会把它保存成额外学习记录，不再重复计次。"
 
 
+def checkin_extra_same_day() -> str:
+    return "今天已经计过一次啦，同一自然日只计 1 次。这份词九会保存成额外学习记录，不再重复计次。"
+
+
 def ai_rejected(feedback: str) -> str:
     return (
         f"这次先不计次呀。词九看到的问题是：{sanitize_feedback(feedback)}。"
@@ -151,6 +155,10 @@ def no_permission() -> str:
 
 def admin_op_ok(target_display: str, count: int) -> str:
     return f"处理完成：{target_display} 当前周已调整为 {count}/2。"
+
+
+def admin_op_ok_extra(target_display: str) -> str:
+    return f"处理完成：{target_display} 本周已满 2/2，这次记为额外，不计入每周次数。"
 
 
 def admin_op_failed(reason: str = "") -> str:

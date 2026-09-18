@@ -34,6 +34,7 @@ async def _finalize(submissions, user, submission_id, sha, text):
         name=user.name,
         submitted_at=NOW,
         week_key="2025-12-29",
+        beijing_date="2025-12-29",
         qq_group_id=None,
         qq_message_id=f"msg-{submission_id}",
         quoted_message_id="q",

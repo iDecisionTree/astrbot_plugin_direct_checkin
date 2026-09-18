@@ -73,6 +73,7 @@ class Submission:
     name_snapshot: str = ""
     submitted_at: str = ""
     week_key: str = ""
+    beijing_date: str | None = None
     qq_group_id: str | None = None
     qq_message_id: str = ""
     quoted_message_id: str = ""
@@ -125,6 +126,7 @@ class Submission:
             name_snapshot=str(d.get("name_snapshot") or ""),
             submitted_at=str(d.get("submitted_at") or ""),
             week_key=str(d.get("week_key") or ""),
+            beijing_date=d.get("beijing_date"),
             qq_group_id=d.get("qq_group_id"),
             qq_message_id=str(d.get("qq_message_id") or ""),
             quoted_message_id=str(d.get("quoted_message_id") or ""),
@@ -166,6 +168,9 @@ class CountAdjustment:
     admin_qq: str
     reason: str | None = None
     created_at: str = ""
+    beijing_date: str | None = None
+    counted: int = 0
+    counted_slot: int | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> CountAdjustment | None:
@@ -180,6 +185,9 @@ class CountAdjustment:
             admin_qq=str(d.get("admin_qq") or ""),
             reason=d.get("reason"),
             created_at=str(d.get("created_at") or ""),
+            beijing_date=d.get("beijing_date"),
+            counted=int(d.get("counted") or 0),
+            counted_slot=(int(d["counted_slot"]) if d.get("counted_slot") is not None else None),
         )
 
 

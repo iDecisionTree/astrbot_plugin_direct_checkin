@@ -14,9 +14,11 @@ from ..repositories.pause_repo import PauseRepository
 from ..repositories.submission_repo import SubmissionRepository
 from ..repositories.user_repo import UserRepository
 from ..utils import response_templates as T
+from ..utils.scoring import week_counted as compute_week_counted
 from ..utils.time_utils import (
     day_end_beijing,
     now_utc,
+    to_beijing,
     utc_iso,
     week_end_beijing,
     week_key_now,
@@ -106,16 +108,40 @@ class AdminService:
         if user is None:
             return T.admin_op_failed("没有找到对应用户")
 
+        now_dt = now_utc()
         week_key = week_key_now(self.timezone)
-        now = utc_iso(now_utc())
-        if delta < 0:
-            current = await self._effective_count(user, week_key)
-            if current <= 0:
-                return T.admin_op_failed("当前周计次已经是 0，不能再减少")
+        beijing_date = to_beijing(now_dt, self.timezone).strftime("%Y-%m-%d")
+        now = utc_iso(now_dt)
+        target_display = T.target_display(user.name, user.student_id)
 
-        await self.admin_repo.add_adjustment(user.id, week_key, delta, actor_qq, now)
-        effective = await self._effective_count(user, week_key)
-        display = min(max(0, effective), self.weekly_limit)
+        if delta > 0:
+            # 人工 +1 与自动打卡共享每周 2 次槽位，超出记为额外。
+            _adjustment, counted, week_total = await self.admin_repo.allocate_positive_adjustment(
+                user.id,
+                week_key,
+                beijing_date,
+                self.weekly_limit,
+                actor_qq,
+                now,
+            )
+            await self._audit(
+                actor_qq,
+                "count_adjust",
+                str(user.id),
+                message_id,
+                f"delta={delta} counted={int(counted)}",
+                now,
+                target_type="user",
+            )
+            if counted:
+                return T.admin_op_ok(target_display, min(week_total, self.weekly_limit))
+            return T.admin_op_ok_extra(target_display)
+
+        current = await self._effective_count(user, week_key)
+        if current <= 0:
+            return T.admin_op_failed("当前周计次已经是 0，不能再减少")
+        await self.admin_repo.add_adjustment(user.id, week_key, -1, actor_qq, now, beijing_date)
+        total = max(0, current - 1)
         await self._audit(
             actor_qq,
             "count_adjust",
@@ -125,7 +151,7 @@ class AdminService:
             now,
             target_type="user",
         )
-        return T.admin_op_ok(T.target_display(user.name, user.student_id), display)
+        return T.admin_op_ok(target_display, min(total, self.weekly_limit))
 
     async def skip(self, actor_qq: str, scope: str, reason: str, message_id: str) -> str:
         aliases = {
@@ -222,8 +248,9 @@ class AdminService:
 
     async def _effective_count(self, user: User, week_key: str) -> int:
         auto = await self.submission_repo.count_auto_counted(user.id, week_key)
-        adjustment = await self.admin_repo.sum_adjustments(user.id, week_key)
-        return auto + adjustment
+        manual_counted = await self.admin_repo.count_counted_in_week(user.id, week_key)
+        manual_negatives = await self.admin_repo.count_negatives_in_week(user.id, week_key)
+        return compute_week_counted(auto, manual_counted, manual_negatives, self.weekly_limit)
 
     async def _audit(
         self,

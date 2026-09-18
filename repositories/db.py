@@ -45,6 +45,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         name_snapshot TEXT NOT NULL DEFAULT '',
         submitted_at TEXT NOT NULL,
         week_key TEXT NOT NULL,
+        beijing_date TEXT,
         qq_group_id TEXT,
         qq_message_id TEXT NOT NULL,
         quoted_message_id TEXT NOT NULL DEFAULT '',
@@ -82,6 +83,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_submissions_texthash ON submissions (normalized_text_sha256)",
     "CREATE INDEX IF NOT EXISTS idx_submissions_user_time ON submissions (user_id, submitted_at)",
     "CREATE INDEX IF NOT EXISTS idx_submissions_week ON submissions (week_key)",
+    "CREATE INDEX IF NOT EXISTS idx_submissions_user_date ON submissions (user_id, beijing_date)",
     "CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions (status)",
     """
     CREATE UNIQUE INDEX IF NOT EXISTS idx_submissions_slot
@@ -96,6 +98,9 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         admin_qq TEXT NOT NULL,
         reason TEXT,
         created_at TEXT NOT NULL,
+        beijing_date TEXT,
+        counted INTEGER NOT NULL DEFAULT 0,
+        counted_slot INTEGER,
         FOREIGN KEY (user_id) REFERENCES users (id)
     )
     """,
@@ -149,9 +154,44 @@ class Database:
         try:
             for statement in SCHEMA_STATEMENTS:
                 conn.execute(statement)
+            self._migrate(conn)
             conn.commit()
         finally:
             conn.close()
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """为旧库补齐新增列，并回填北京时间日期。"""
+
+        additions = (
+            ("submissions", "beijing_date", "TEXT"),
+            ("count_adjustments", "beijing_date", "TEXT"),
+            ("count_adjustments", "counted", "INTEGER NOT NULL DEFAULT 0"),
+            ("count_adjustments", "counted_slot", "INTEGER"),
+        )
+        for table, column, decl in additions:
+            columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+        # 回填 beijing_date，便于按北京日期做“每日一次”判定。
+        from ..utils.time_utils import parse_iso, to_beijing
+
+        for table, time_column in (
+            ("submissions", "submitted_at"),
+            ("count_adjustments", "created_at"),
+        ):
+            rows = conn.execute(
+                f"SELECT id, {time_column} AS ts FROM {table} WHERE beijing_date IS NULL"
+            ).fetchall()
+            for row in rows:
+                moment = parse_iso(row["ts"])
+                if moment is None:
+                    continue
+                conn.execute(
+                    f"UPDATE {table} SET beijing_date = ? WHERE id = ?",
+                    (to_beijing(moment).strftime("%Y-%m-%d"), row["id"]),
+                )
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self._create_schema)

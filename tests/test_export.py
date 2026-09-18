@@ -34,6 +34,7 @@ def test_export_workbook_structure(tmp_path: Path):
             name=user.name,
             submitted_at=NOW,
             week_key=week_key,
+            beijing_date="2026-01-05",
             qq_group_id="999",
             qq_message_id="msg-1",
             quoted_message_id="q1",
@@ -51,7 +52,9 @@ def test_export_workbook_structure(tmp_path: Path):
             ai_decision="pass",
             updated_at=NOW,
         )
-        await admins.add_adjustment(user.id, week_key, 1, "2747344390", NOW)
+        await admins.allocate_positive_adjustment(
+            user.id, week_key, "2026-01-06", 2, "2747344390", NOW
+        )
 
         service = ExportService(
             user_repo=users,
@@ -81,9 +84,12 @@ def test_export_workbook_structure(tmp_path: Path):
         assert summary["G2"].value == 1
         assert summary["H2"].value == 2
         assert summary["J2"].value == "是"
+        # 累计有效计分次数 = 1 次通过提交 + 1 次人工 = 2。
+        assert summary["N1"].value == "累计有效计分次数"
+        assert summary["N2"].value == 2
         # 累计完成周数：本周有效计次 2，计 1 周。
-        assert summary["N1"].value == "累计完成周数"
-        assert summary["N2"].value == 1
+        assert summary["O1"].value == "累计完成周数"
+        assert summary["O2"].value == 1
 
         detail = workbook["打卡明细"]
         assert detail.max_row == 2

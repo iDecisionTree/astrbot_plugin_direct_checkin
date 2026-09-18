@@ -124,6 +124,7 @@ class CheckinService:
         submission_id = uuid.uuid4().hex
         beijing = to_beijing(now_utc(), self.timezone)
         label = beijing.strftime("%Y-%m-%d_%H-%M-%S")
+        beijing_date = beijing.strftime("%Y-%m-%d")
 
         try:
             stored = await self.file_service.prepare(replied, user, submission_id, label)
@@ -140,6 +141,7 @@ class CheckinService:
                 name=user.name,
                 submitted_at=now_iso,
                 week_key=week_key,
+                beijing_date=beijing_date,
                 qq_group_id=(str(event.get_group_id()) if event.get_group_id() else None),
                 qq_message_id=str(getattr(event.message_obj, "message_id", "") or ""),
                 quoted_message_id=replied.quoted_message_id,
@@ -155,7 +157,9 @@ class CheckinService:
             return CheckinResult(CheckinOutcome.FILE_ERROR, T.processing_error())
 
         try:
-            return await self._finalize_process(event, user, submission, stored, now_iso, week_key)
+            return await self._finalize_process(
+                event, user, submission, stored, now_iso, week_key, beijing_date
+            )
         except Exception:
             self.logger.exception("打卡处理异常 submission=%s", submission_id)
             try:
@@ -184,6 +188,7 @@ class CheckinService:
         stored: StoredFile,
         now_iso: str,
         week_key: str,
+        beijing_date: str,
     ) -> CheckinResult:
         # 1) 查重
         since = utc_iso(
@@ -302,21 +307,28 @@ class CheckinService:
                 SubmissionStatus.REJECTED_AI.value,
             )
 
-        status, _slot, auto_total = await self.submission_repo.finalize_counted(
-            submission.id, user.id, week_key, self.weekly_limit, ai_fields
+        status, _slot, week_total, reason = await self.submission_repo.finalize_counted(
+            submission.id,
+            user.id,
+            week_key,
+            beijing_date,
+            self.weekly_limit,
+            ai_fields,
         )
         await self.user_repo.touch_last_submission(user.id, now_iso)
         await self._audit(user, "checkin", submission.id, status, now_iso)
 
-        adjustment = await self.admin_repo.sum_adjustments(user.id, week_key)
-        effective = max(0, auto_total + adjustment)
         if status == SubmissionStatus.VALID_COUNTED.value:
-            if auto_total <= 1:
+            if week_total <= 1:
                 text = T.checkin_success_first(ai_outcome.brief_feedback)
             else:
                 text = T.checkin_success_complete(ai_outcome.brief_feedback)
-            return CheckinResult(CheckinOutcome.COUNTED, text, status, effective)
-        return CheckinResult(CheckinOutcome.EXTRA, T.checkin_extra(), status, effective)
+            return CheckinResult(CheckinOutcome.COUNTED, text, status, week_total)
+        if reason == "same_day":
+            return CheckinResult(
+                CheckinOutcome.EXTRA, T.checkin_extra_same_day(), status, week_total
+            )
+        return CheckinResult(CheckinOutcome.EXTRA, T.checkin_extra(), status, week_total)
 
     async def _load_previous_text(self, submission: Submission) -> str:
         if not submission.stored_path:

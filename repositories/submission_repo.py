@@ -36,6 +36,56 @@ _UPDATABLE_COLUMNS = frozenset(
 )
 
 
+def _count_counted_submissions(conn: sqlite3.Connection, user_id: int, week_key: str) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS c FROM submissions
+        WHERE user_id = ? AND week_key = ? AND status = ?
+        """,
+        (user_id, week_key, SubmissionStatus.VALID_COUNTED.value),
+    ).fetchone()
+    return int(row["c"]) if row else 0
+
+
+def _count_counted_adjustments(conn: sqlite3.Connection, user_id: int, week_key: str) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS c FROM count_adjustments
+        WHERE user_id = ? AND week_key = ? AND counted = 1
+        """,
+        (user_id, week_key),
+    ).fetchone()
+    return int(row["c"]) if row else 0
+
+
+def _count_manual_negatives(conn: sqlite3.Connection, user_id: int, week_key: str) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS c FROM count_adjustments
+        WHERE user_id = ? AND week_key = ? AND delta < 0
+        """,
+        (user_id, week_key),
+    ).fetchone()
+    return int(row["c"]) if row else 0
+
+
+def _count_counted_submissions_on_date(
+    conn: sqlite3.Connection, user_id: int, beijing_date: str
+) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS c FROM submissions
+        WHERE user_id = ? AND beijing_date = ? AND counted = 1
+        """,
+        (user_id, beijing_date),
+    ).fetchone()
+    return int(row["c"]) if row else 0
+
+
+def _has_counted_on_date(conn: sqlite3.Connection, user_id: int, beijing_date: str) -> bool:
+    return _count_counted_submissions_on_date(conn, user_id, beijing_date) > 0
+
+
 def _build_update(conn: sqlite3.Connection, submission_id: str, fields: dict[str, Any]) -> None:
     if not fields:
         return
@@ -60,6 +110,7 @@ class SubmissionRepository:
         name: str,
         submitted_at: str,
         week_key: str,
+        beijing_date: str,
         qq_group_id: str | None,
         qq_message_id: str,
         quoted_message_id: str,
@@ -74,10 +125,10 @@ class SubmissionRepository:
                 """
                 INSERT INTO submissions (
                     id, user_id, qq_id_snapshot, student_id_snapshot, name_snapshot,
-                    submitted_at, week_key, qq_group_id, qq_message_id, quoted_message_id,
-                    original_filename, stored_path, file_size, sha256,
+                    submitted_at, week_key, beijing_date, qq_group_id, qq_message_id,
+                    quoted_message_id, original_filename, stored_path, file_size, sha256,
                     status, counted, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                 """,
                 (
                     submission_id,
@@ -87,6 +138,7 @@ class SubmissionRepository:
                     name,
                     submitted_at,
                     week_key,
+                    beijing_date,
                     qq_group_id,
                     qq_message_id,
                     quoted_message_id,
@@ -135,33 +187,47 @@ class SubmissionRepository:
         submission_id: str,
         user_id: int,
         week_key: str,
+        beijing_date: str,
         weekly_limit: int,
         fields: dict[str, Any],
-    ) -> tuple[str, int | None, int]:
+    ) -> tuple[str, int | None, int, str]:
         """在事务中确定计分槽并写入最终状态。
 
-        返回 (status, counted_slot, 本周自动计分总数)。
+        计次规则（自动打卡）：
+        - 与人工 +1 共享每周 ``weekly_limit`` 个计分槽；
+        - 同一北京自然日最多计一次，当天第二次及以上有效打卡记为额外；
+        - 人工 -1 会减少本周可用槽位。
+
+        返回 (status, counted_slot, 本周有效计次, reason)，
+        reason 取值：``counted`` / ``same_day`` / ``week_full``。
         """
 
-        def work(conn: sqlite3.Connection) -> tuple[str, int | None, int]:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) AS c FROM submissions
-                WHERE user_id = ? AND week_key = ? AND status = ?
-                """,
-                (user_id, week_key, SubmissionStatus.VALID_COUNTED.value),
-            ).fetchone()
-            counted = int(row["c"]) if row else 0
-            if counted < weekly_limit:
+        def work(conn: sqlite3.Connection) -> tuple[str, int | None, int, str]:
+            auto_counted = _count_counted_submissions(conn, user_id, week_key)
+            manual_counted = _count_counted_adjustments(conn, user_id, week_key)
+            manual_negatives = _count_manual_negatives(conn, user_id, week_key)
+            current = max(0, auto_counted + manual_counted - manual_negatives)
+            same_day = _has_counted_on_date(conn, user_id, beijing_date)
+
+            if same_day:
+                status = SubmissionStatus.VALID_EXTRA.value
+                slot: int | None = None
+                counted_flag = 0
+                total = current
+                reason = "same_day"
+            elif current < weekly_limit:
                 status = SubmissionStatus.VALID_COUNTED.value
-                slot: int | None = counted + 1
+                slot = current + 1
                 counted_flag = 1
-                total = counted + 1
+                total = current + 1
+                reason = "counted"
             else:
                 status = SubmissionStatus.VALID_EXTRA.value
                 slot = None
                 counted_flag = 0
-                total = counted
+                total = current
+                reason = "week_full"
+
             payload = dict(fields)
             payload.update(
                 {
@@ -171,10 +237,16 @@ class SubmissionRepository:
                 }
             )
             _build_update(conn, submission_id, payload)
-            return status, slot, total
+            return status, slot, total, reason
 
         # immediate=True 防止同用户并发写覆盖计分槽。
         return await self.db.transaction(work, immediate=True)
+
+    async def count_counted_on_date(self, user_id: int, beijing_date: str) -> int:
+        def work(conn: sqlite3.Connection) -> int:
+            return _count_counted_submissions_on_date(conn, user_id, beijing_date)
+
+        return await self.db.fetch(work)
 
     async def find_final_by_sha(
         self, user_id: int, sha256: str, final_statuses: set[str]

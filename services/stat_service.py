@@ -11,6 +11,7 @@ from ..repositories.pause_repo import PauseRepository
 from ..repositories.submission_repo import SubmissionRepository
 from ..repositories.user_repo import UserRepository
 from ..utils import response_templates as T
+from ..utils.scoring import week_counted as compute_week_counted
 from ..utils.time_utils import week_key_now
 
 _CJK_FONT_CANDIDATES = (
@@ -68,11 +69,17 @@ class StatService:
             return StatBundle(text=T.stat_normal(0, 0, 0, 0), image_path=None)
 
         auto_by_user = await self.submission_repo.count_auto_counted_by_week(week_key)
-        adjust_by_user = await self.admin_repo.sum_adjustments_by_week(week_key)
+        manual_counted_by_user = await self.admin_repo.count_counted_by_week(week_key)
+        manual_neg_by_user = await self.admin_repo.count_negatives_by_week(week_key)
 
         completed = one = zero = 0
         for user in users:
-            effective = max(0, auto_by_user.get(user.id, 0) + adjust_by_user.get(user.id, 0))
+            effective = compute_week_counted(
+                auto_by_user.get(user.id, 0),
+                manual_counted_by_user.get(user.id, 0),
+                manual_neg_by_user.get(user.id, 0),
+                self.weekly_limit,
+            )
             if effective >= self.weekly_limit:
                 completed += 1
             elif effective == 1:

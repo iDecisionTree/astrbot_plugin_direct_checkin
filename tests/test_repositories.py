@@ -11,7 +11,7 @@ from astrbot_plugin_direct_checkin.repositories.user_repo import UserRepository
 NOW = "2026-01-01T00:00:00+00:00"
 
 
-async def _make_pending(submissions, user, submission_id: str):
+async def _make_pending(submissions, user, submission_id: str, beijing_date: str = "2025-12-29"):
     return await submissions.create_pending(
         submission_id=submission_id,
         user_id=user.id,
@@ -20,6 +20,7 @@ async def _make_pending(submissions, user, submission_id: str):
         name=user.name,
         submitted_at=NOW,
         week_key="2025-12-29",
+        beijing_date=beijing_date,
         qq_group_id=None,
         qq_message_id=f"msg-{submission_id}",
         quoted_message_id="q",
@@ -31,7 +32,7 @@ async def _make_pending(submissions, user, submission_id: str):
     )
 
 
-def test_counted_slots_respect_weekly_limit(tmp_path: Path):
+def test_counted_slots_respect_weekly_and_daily_limits(tmp_path: Path):
     async def scenario() -> None:
         db = Database(tmp_path / "checkin.db")
         await db.initialize()
@@ -39,27 +40,82 @@ def test_counted_slots_respect_weekly_limit(tmp_path: Path):
         submissions = SubmissionRepository(db)
         user = await users.create("1001", "2026123456", "张三", None, NOW)
 
-        await _make_pending(submissions, user, "s1")
-        status1, slot1, total1 = await submissions.finalize_counted(
-            "s1", user.id, "2025-12-29", 2, {}
+        await _make_pending(submissions, user, "s1", "2025-12-29")
+        status1, slot1, total1, reason1 = await submissions.finalize_counted(
+            "s1", user.id, "2025-12-29", "2025-12-29", 2, {}
         )
-        assert (status1, slot1, total1) == (SubmissionStatus.VALID_COUNTED.value, 1, 1)
+        assert (status1, slot1, total1, reason1) == (
+            SubmissionStatus.VALID_COUNTED.value,
+            1,
+            1,
+            "counted",
+        )
 
-        await _make_pending(submissions, user, "s2")
-        status2, slot2, total2 = await submissions.finalize_counted(
-            "s2", user.id, "2025-12-29", 2, {}
+        # 同一天第二份：每日只能计一次，记为额外。
+        await _make_pending(submissions, user, "s2", "2025-12-29")
+        status2, slot2, total2, reason2 = await submissions.finalize_counted(
+            "s2", user.id, "2025-12-29", "2025-12-29", 2, {}
         )
-        assert (status2, slot2, total2) == (SubmissionStatus.VALID_COUNTED.value, 2, 2)
+        assert status2 == SubmissionStatus.VALID_EXTRA.value
+        assert slot2 is None and total2 == 1 and reason2 == "same_day"
 
-        await _make_pending(submissions, user, "s3")
-        status3, slot3, total3 = await submissions.finalize_counted(
-            "s3", user.id, "2025-12-29", 2, {}
+        # 换一天：占用第 2 槽。
+        await _make_pending(submissions, user, "s3", "2025-12-30")
+        status3, slot3, total3, reason3 = await submissions.finalize_counted(
+            "s3", user.id, "2025-12-29", "2025-12-30", 2, {}
         )
-        assert status3 == SubmissionStatus.VALID_EXTRA.value
-        assert slot3 is None
-        assert total3 == 2
+        assert (status3, slot3, total3, reason3) == (
+            SubmissionStatus.VALID_COUNTED.value,
+            2,
+            2,
+            "counted",
+        )
+
+        # 第 3 个不同日：本周已满，额外。
+        await _make_pending(submissions, user, "s4", "2025-12-31")
+        status4, slot4, total4, reason4 = await submissions.finalize_counted(
+            "s4", user.id, "2025-12-29", "2025-12-31", 2, {}
+        )
+        assert status4 == SubmissionStatus.VALID_EXTRA.value
+        assert slot4 is None and total4 == 2 and reason4 == "week_full"
 
         assert await submissions.count_auto_counted(user.id, "2025-12-29") == 2
+
+    asyncio.run(scenario())
+
+
+def test_manual_adjustment_shares_weekly_slots(tmp_path: Path):
+    async def scenario() -> None:
+        db = Database(tmp_path / "checkin.db")
+        await db.initialize()
+        users = UserRepository(db)
+        submissions = SubmissionRepository(db)
+        admins = AdminRepository(db)
+        user = await users.create("1001", "2026123456", "张三", None, NOW)
+
+        # 人工先占第 1 槽。
+        _adj, counted1, total1 = await admins.allocate_positive_adjustment(
+            user.id, "2025-12-29", "2025-12-29", 2, "2747344390", NOW
+        )
+        assert counted1 is True and total1 == 1
+
+        # 自动打卡占第 2 槽。
+        await _make_pending(submissions, user, "s1", "2025-12-30")
+        status, slot, total, reason = await submissions.finalize_counted(
+            "s1", user.id, "2025-12-29", "2025-12-30", 2, {}
+        )
+        assert (status, slot, total, reason) == (
+            SubmissionStatus.VALID_COUNTED.value,
+            2,
+            2,
+            "counted",
+        )
+
+        # 再来人工 +1，本周已满，记为额外。
+        _adj2, counted2, total2 = await admins.allocate_positive_adjustment(
+            user.id, "2025-12-29", "2025-12-31", 2, "2747344390", NOW
+        )
+        assert counted2 is False and total2 == 2
 
     asyncio.run(scenario())
 
@@ -87,9 +143,9 @@ def test_adjustments_sum_per_week(tmp_path: Path):
         users = UserRepository(db)
         admins = AdminRepository(db)
         user = await users.create("1001", "2026123456", "张三", None, NOW)
-        await admins.add_adjustment(user.id, "2025-12-29", 1, "2747344390", NOW)
-        await admins.add_adjustment(user.id, "2025-12-29", -1, "2747344390", NOW)
-        await admins.add_adjustment(user.id, "2025-12-29", 1, "2747344390", NOW)
+        await admins.add_adjustment(user.id, "2025-12-29", 1, "2747344390", NOW, "2025-12-29")
+        await admins.add_adjustment(user.id, "2025-12-29", -1, "2747344390", NOW, "2025-12-29")
+        await admins.add_adjustment(user.id, "2025-12-29", 1, "2747344390", NOW, "2025-12-29")
         assert await admins.sum_adjustments(user.id, "2025-12-29") == 1
         by_week = await admins.sum_adjustments_by_week("2025-12-29")
         assert by_week[user.id] == 1
@@ -134,7 +190,7 @@ def test_reset_clears_checkin_data_but_keeps_admins(tmp_path: Path):
         await admins.add("2747344390", "bootstrap", NOW)
         user = await users.create("1001", "2026123456", "张三", None, NOW)
         await _make_pending(submissions, user, "s1")
-        await admins.add_adjustment(user.id, "2025-12-29", 1, "2747344390", NOW)
+        await admins.add_adjustment(user.id, "2025-12-29", 1, "2747344390", NOW, "2025-12-29")
         await pauses.create("day", NOW, NOW, "维护", "2747344390", NOW)
 
         counts = await db.reset_checkin_data()

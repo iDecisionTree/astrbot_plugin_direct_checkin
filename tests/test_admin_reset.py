@@ -85,6 +85,26 @@ def test_skip_accepts_d_and_w_scope(tmp_path: Path):
     asyncio.run(scenario())
 
 
+def test_adjust_shares_weekly_cap(tmp_path: Path):
+    async def scenario() -> None:
+        nas = tmp_path / "nas"
+        nas.mkdir()
+        _, repos, service = await _make_service(tmp_path, nas)
+        await repos["admin_repo"].add(SUPER, "bootstrap", NOW)
+        await repos["user_repo"].create("1001", "2026000001", "张三", None, NOW)
+
+        first = await service.adjust(SUPER, "2026000001", 1, "m1")
+        assert "1/2" in first
+        second = await service.adjust(SUPER, "2026000001", 1, "m2")
+        assert "2/2" in second
+        third = await service.adjust(SUPER, "2026000001", 1, "m3")
+        assert "额外" in third
+        reduced = await service.adjust(SUPER, "2026000001", -1, "m4")
+        assert "1/2" in reduced
+
+    asyncio.run(scenario())
+
+
 def test_export_not_paused_after_resume(tmp_path: Path):
     async def scenario() -> None:
         nas = tmp_path / "nas"

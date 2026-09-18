@@ -10,6 +10,8 @@ from ..repositories.admin_repo import AdminRepository
 from ..repositories.pause_repo import PauseRepository
 from ..repositories.submission_repo import SubmissionRepository
 from ..repositories.user_repo import UserRepository
+from ..utils.scoring import cumulative_valid
+from ..utils.scoring import week_counted as compute_week_counted
 from ..utils.time_utils import (
     format_beijing,
     now_utc,
@@ -20,6 +22,7 @@ from ..utils.time_utils import (
 
 _COUNTED = {SubmissionStatus.VALID_COUNTED.value}
 _EXTRA = {SubmissionStatus.VALID_EXTRA.value}
+_VALID_ALL = _COUNTED | _EXTRA
 _INVALID = {
     SubmissionStatus.REJECTED_AI.value,
     SubmissionStatus.REJECTED_DUPLICATE.value,
@@ -42,6 +45,7 @@ _USER_HEADERS = [
     "累计自动有效计分次数",
     "累计额外有效提交数",
     "累计无效提交数",
+    "累计有效计分次数",
     "累计完成周数",
     "最后打卡时间",
 ]
@@ -125,8 +129,6 @@ class ExportService:
         pauses = await self.pause_repo.list_pauses()
 
         week_key = week_key_now(self.timezone)
-        auto_by_user = await self.submission_repo.count_auto_counted_by_week(week_key)
-        adjust_by_user = await self.admin_repo.sum_adjustments_by_week(week_key)
         exemption = await self.pause_repo.exempted_week(week_key)
         week_paused = exemption is not None
         required = 0 if week_paused else self.weekly_limit
@@ -134,24 +136,46 @@ class ExportService:
         user_by_id = {user.id: user for user in users}
         submissions_by_user: dict[int, list] = {user.id: [] for user in users}
         auto_week_by_user: dict[int, dict[str, int]] = {}
-        adjust_week_by_user: dict[int, dict[str, int]] = {}
+        manual_counted_week: dict[int, dict[str, int]] = {}
+        manual_neg_week: dict[int, dict[str, int]] = {}
+        manual_net_week: dict[int, dict[str, int]] = {}
+        manual_net_all: dict[int, int] = {}
+        passed_all: dict[int, int] = {}
         for item in submissions:
             submissions_by_user.setdefault(item.user_id, []).append(item)
             if item.status in _COUNTED and item.week_key:
                 bucket = auto_week_by_user.setdefault(item.user_id, {})
                 bucket[item.week_key] = bucket.get(item.week_key, 0) + 1
+            if item.status in _VALID_ALL:
+                passed_all[item.user_id] = passed_all.get(item.user_id, 0) + 1
         for item in adjustments:
-            bucket = adjust_week_by_user.setdefault(item.user_id, {})
-            bucket[item.week_key] = bucket.get(item.week_key, 0) + item.delta
+            manual_net_all[item.user_id] = manual_net_all.get(item.user_id, 0) + item.delta
+            net_bucket = manual_net_week.setdefault(item.user_id, {})
+            net_bucket[item.week_key] = net_bucket.get(item.week_key, 0) + item.delta
+            if item.counted:
+                bucket = manual_counted_week.setdefault(item.user_id, {})
+                bucket[item.week_key] = bucket.get(item.week_key, 0) + 1
+            if item.delta < 0:
+                bucket = manual_neg_week.setdefault(item.user_id, {})
+                bucket[item.week_key] = bucket.get(item.week_key, 0) + 1
+
+        def week_total(target_user_id: int, target_week: str) -> int:
+            auto = auto_week_by_user.get(target_user_id, {}).get(target_week, 0)
+            manual = manual_counted_week.get(target_user_id, {}).get(target_week, 0)
+            negatives = manual_neg_week.get(target_user_id, {}).get(target_week, 0)
+            return compute_week_counted(auto, manual, negatives, self.weekly_limit)
 
         def completed_week_count(target_user_id: int) -> int:
-            auto_weeks = auto_week_by_user.get(target_user_id, {})
-            adjust_weeks = adjust_week_by_user.get(target_user_id, {})
-            total_weeks = 0
-            for week in set(auto_weeks) | set(adjust_weeks):
-                if auto_weeks.get(week, 0) + adjust_weeks.get(week, 0) >= self.weekly_limit:
-                    total_weeks += 1
-            return total_weeks
+            weeks = set(auto_week_by_user.get(target_user_id, {})) | set(
+                manual_net_week.get(target_user_id, {})
+            )
+            return sum(1 for week in weeks if week_total(target_user_id, week) >= self.weekly_limit)
+
+        def cumulative_valid_score(target_user_id: int) -> int:
+            return cumulative_valid(
+                passed_all.get(target_user_id, 0),
+                manual_net_all.get(target_user_id, 0),
+            )
 
         try:
             from openpyxl import Workbook
@@ -165,9 +189,9 @@ class ExportService:
         summary.title = "用户汇总"
         summary.append(_USER_HEADERS)
         for user in users:
-            auto = auto_by_user.get(user.id, 0)
-            adjust = adjust_by_user.get(user.id, 0)
-            effective = max(0, auto + adjust)
+            auto = auto_week_by_user.get(user.id, {}).get(week_key, 0)
+            adjust = manual_net_week.get(user.id, {}).get(week_key, 0)
+            effective = week_total(user.id, week_key)
             records = submissions_by_user.get(user.id, [])
             counted_total = sum(1 for r in records if r.status in _COUNTED)
             extra_total = sum(1 for r in records if r.status in _EXTRA)
@@ -191,6 +215,7 @@ class ExportService:
                     counted_total,
                     extra_total,
                     invalid_total,
+                    cumulative_valid_score(user.id),
                     completed_week_count(user.id),
                     format_beijing(parse_iso(user.last_submission_at), tz_name=self.timezone),
                 ]
