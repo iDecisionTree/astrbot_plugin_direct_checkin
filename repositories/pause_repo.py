@@ -80,11 +80,17 @@ class PauseRepository:
         return await self.db.run(work)
 
     async def exempted_week(self, week_key: str) -> PausePeriod | None:
+        """返回该周仍处于生效中的暂停周记录。
+
+        `/d resume` 会写入 ``resumed_at``，恢复后不再豁免，本周重新要求打卡。
+        """
+
         def work(conn: sqlite3.Connection) -> PausePeriod | None:
             row = conn.execute(
                 """
                 SELECT * FROM pause_periods
                 WHERE exemption_week_key = ?
+                  AND resumed_at IS NULL
                 ORDER BY id DESC
                 LIMIT 1
                 """,

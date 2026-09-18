@@ -8,8 +8,10 @@ from astrbot_plugin_direct_checkin.repositories.pause_repo import PauseRepositor
 from astrbot_plugin_direct_checkin.repositories.submission_repo import SubmissionRepository
 from astrbot_plugin_direct_checkin.repositories.user_repo import UserRepository
 from astrbot_plugin_direct_checkin.services.admin_service import AdminService
+from astrbot_plugin_direct_checkin.services.export_service import ExportService
 from astrbot_plugin_direct_checkin.services.file_service import FileService
 from astrbot_plugin_direct_checkin.utils.time_utils import now_utc, utc_iso
+from openpyxl import load_workbook
 
 NOW = "2026-01-01T00:00:00+00:00"
 SUPER = "2747344390"
@@ -79,6 +81,38 @@ def test_skip_accepts_d_and_w_scope(tmp_path: Path):
 
         invalid = await service.skip(SUPER, "x", "", "m4")
         assert "没改成功" in invalid
+
+    asyncio.run(scenario())
+
+
+def test_export_not_paused_after_resume(tmp_path: Path):
+    async def scenario() -> None:
+        nas = tmp_path / "nas"
+        nas.mkdir()
+        _, repos, service = await _make_service(tmp_path, nas)
+        await repos["admin_repo"].add(SUPER, "bootstrap", NOW)
+        await repos["user_repo"].create("1001", "2026000001", "张三", None, NOW)
+
+        await service.skip(SUPER, "w", "期中考试", "m1")
+        await service.resume(SUPER, "m2")
+
+        export = ExportService(
+            user_repo=repos["user_repo"],
+            submission_repo=repos["submission_repo"],
+            admin_repo=repos["admin_repo"],
+            pause_repo=repos["pause_repo"],
+            export_dir=tmp_path / "exports",
+            weekly_limit=2,
+            timezone="Asia/Shanghai",
+        )
+        bundle = await export.export()
+        workbook = load_workbook(bundle.path)
+        summary = workbook["用户汇总"]
+        headers = [cell.value for cell in summary[1]]
+        row = [cell.value for cell in summary[2]]
+        data = dict(zip(headers, row, strict=True))
+        assert data["当前周是否完成"] != "暂停周"
+        assert data["当前周应打卡次数"] == 2
 
     asyncio.run(scenario())
 

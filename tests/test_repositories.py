@@ -110,12 +110,14 @@ def test_pause_active_resume_and_week_exemption(tmp_path: Path):
         active = await pauses.active("2026-01-02T00:00:00+00:00")
         assert active is not None and active.scope == "week"
 
+        exempt = await pauses.exempted_week("2025-12-29")
+        assert exempt is not None and exempt.reason == "期中考试"
+
         rowcount = await pauses.resume_active("2026-01-02T00:00:00+00:00")
         assert rowcount == 1
         assert await pauses.active("2026-01-02T00:00:01+00:00") is None
-
-        exempt = await pauses.exempted_week("2025-12-29")
-        assert exempt is not None and exempt.reason == "期中考试"
+        # resume 后本周不再豁免，重新要求打卡。
+        assert await pauses.exempted_week("2025-12-29") is None
 
     asyncio.run(scenario())
 

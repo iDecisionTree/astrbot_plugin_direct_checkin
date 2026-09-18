@@ -242,8 +242,9 @@ SELECT week_key,status,counted,counted_slot FROM submissions ORDER BY submitted_
 | 7.4 本周暂停 | `/d skip w 期中考试周` | 本周暂停 |
 | 7.5 暂停周统计 | `/d stat` | `本周已暂停打卡，共 N 人，本周不计缺卡。原因：期中考试周` |
 | 7.6 提前恢复 | `/d resume` | `恢复好啦～现在可以继续提交打卡喵。`，可继续打卡 |
-| 7.7 暂停周豁免保留 | resume 后查看导出 | 本周仍标记暂停周/不计缺卡 |
-| 7.8 无暂停可恢复 | 再次 `/d resume` | `现在没有生效中的暂停呀…` |
+| 7.7 恢复后不再豁免 | resume 后 `/d stat`、`/d get` | 不显示“暂停周”，按正常周统计/导出（应打卡 2 次）|
+| 7.8 恢复结束全部暂停 | 先 `/d skip d` 再 `/d skip w`，然后 `/d resume` | day/week 两条暂停都被结束，可继续打卡 |
+| 7.9 无暂停可恢复 | 再次 `/d resume` | `现在没有生效中的暂停呀…` |
 
 ---
 
