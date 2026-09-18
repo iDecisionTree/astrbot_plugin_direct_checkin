@@ -109,8 +109,13 @@ def day_end_beijing(dt: datetime, tz_name: str | None = None) -> datetime:
 
 
 def format_beijing(
-    dt: datetime | None, fmt: str = "%Y-%m-%d %H:%M:%S", tz_name: str | None = None
+    dt: datetime | None, tz_name: str | None = None, fmt: str = "%Y-%m-%d %H:%M:%S"
 ) -> str:
+    """把时间格式化为北京时间字符串。
+
+    参数顺序刻意让 ``tz_name`` 位于 ``fmt`` 之前，避免误把时区名当成格式串。
+    """
+
     if dt is None:
         return ""
     return to_beijing(dt, tz_name).strftime(fmt)

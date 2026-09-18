@@ -1,4 +1,5 @@
 import asyncio
+import re
 from pathlib import Path
 
 from astrbot_plugin_direct_checkin.models.enums import SubmissionStatus
@@ -73,6 +74,8 @@ def test_export_workbook_structure(tmp_path: Path):
         # QQ号/学号/姓名
         assert summary["A2"].value == "1001"
         assert summary["B2"].value == "2026123456"
+        # 绑定时间必须是北京时间字符串，而不是时区名。
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", str(summary["E2"].value))
         # 当前周自动计分次数=1，人工调整=1，有效计次=2，是否完成=是
         assert summary["F2"].value == 1
         assert summary["G2"].value == 1
@@ -81,6 +84,7 @@ def test_export_workbook_structure(tmp_path: Path):
 
         detail = workbook["打卡明细"]
         assert detail.max_row == 2
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", str(detail["E2"].value))
         adjust = workbook["人工调整"]
         assert adjust.max_row == 2
 

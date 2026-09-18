@@ -164,7 +164,7 @@ class ExportService:
                     user.student_id,
                     user.name,
                     user.direction or "",
-                    format_beijing(parse_iso(user.bound_at), self.timezone),
+                    format_beijing(parse_iso(user.bound_at), tz_name=self.timezone),
                     auto,
                     adjust,
                     effective,
@@ -173,7 +173,7 @@ class ExportService:
                     counted_total,
                     extra_total,
                     invalid_total,
-                    format_beijing(parse_iso(user.last_submission_at), self.timezone),
+                    format_beijing(parse_iso(user.last_submission_at), tz_name=self.timezone),
                 ]
             )
 
@@ -186,7 +186,7 @@ class ExportService:
                     item.qq_id_snapshot,
                     item.student_id_snapshot,
                     item.name_snapshot,
-                    format_beijing(parse_iso(item.submitted_at), self.timezone),
+                    format_beijing(parse_iso(item.submitted_at), tz_name=self.timezone),
                     item.week_key,
                     item.qq_group_id or "",
                     item.qq_message_id,
@@ -215,7 +215,7 @@ class ExportService:
             user = user_by_id.get(item.user_id)
             adjust_sheet.append(
                 [
-                    format_beijing(parse_iso(item.created_at), self.timezone),
+                    format_beijing(parse_iso(item.created_at), tz_name=self.timezone),
                     item.week_key,
                     user.qq_id if user else "",
                     user.student_id if user else "",
@@ -231,9 +231,9 @@ class ExportService:
             pause_sheet.append(
                 [
                     item.scope,
-                    format_beijing(parse_iso(item.start_at), self.timezone),
-                    format_beijing(parse_iso(item.scheduled_end_at), self.timezone),
-                    format_beijing(parse_iso(item.resumed_at), self.timezone),
+                    format_beijing(parse_iso(item.start_at), tz_name=self.timezone),
+                    format_beijing(parse_iso(item.scheduled_end_at), tz_name=self.timezone),
+                    format_beijing(parse_iso(item.resumed_at), tz_name=self.timezone),
                     item.reason,
                     item.created_by_qq,
                     item.exemption_week_key or "",
