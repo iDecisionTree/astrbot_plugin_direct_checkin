@@ -87,9 +87,9 @@ def test_adjustments_sum_per_week(tmp_path: Path):
         users = UserRepository(db)
         admins = AdminRepository(db)
         user = await users.create("1001", "2026123456", "张三", None, NOW)
-        await admins.add_adjustment(user.id, "2025-12-29", 1, "274734439", NOW)
-        await admins.add_adjustment(user.id, "2025-12-29", -1, "274734439", NOW)
-        await admins.add_adjustment(user.id, "2025-12-29", 1, "274734439", NOW)
+        await admins.add_adjustment(user.id, "2025-12-29", 1, "2747344390", NOW)
+        await admins.add_adjustment(user.id, "2025-12-29", -1, "2747344390", NOW)
+        await admins.add_adjustment(user.id, "2025-12-29", 1, "2747344390", NOW)
         assert await admins.sum_adjustments(user.id, "2025-12-29") == 1
         by_week = await admins.sum_adjustments_by_week("2025-12-29")
         assert by_week[user.id] == 1
@@ -105,7 +105,7 @@ def test_pause_active_resume_and_week_exemption(tmp_path: Path):
 
         started = "2026-01-01T00:00:00+00:00"
         ended = "2026-01-07T16:00:00+00:00"
-        await pauses.create("week", started, ended, "期中考试", "274734439", started, "2025-12-29")
+        await pauses.create("week", started, ended, "期中考试", "2747344390", started, "2025-12-29")
 
         active = await pauses.active("2026-01-02T00:00:00+00:00")
         assert active is not None and active.scope == "week"

@@ -2,8 +2,8 @@
   "bootstrap_admin_qq": {
     "description": "初始/恢复管理员 QQ",
     "type": "string",
-    "default": "274734439",
-    "hint": "首次创建数据库时写入该 QQ 为管理员。若管理员表为空，也会用该值做一次恢复性初始化。"
+    "default": "2747344390",
+    "hint": "管理员权限按 QQ 号验证（学号不参与鉴权）。首次创建数据库时写入该 QQ 为管理员；若管理员表为空，也会用该值做一次恢复性初始化。"
   },
   "nas_base_dir": {
     "description": "打卡文件根目录",

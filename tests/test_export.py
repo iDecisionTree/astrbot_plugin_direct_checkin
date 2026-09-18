@@ -50,7 +50,7 @@ def test_export_workbook_structure(tmp_path: Path):
             ai_decision="pass",
             updated_at=NOW,
         )
-        await admins.add_adjustment(user.id, week_key, 1, "274734439", NOW)
+        await admins.add_adjustment(user.id, week_key, 1, "2747344390", NOW)
 
         service = ExportService(
             user_repo=users,

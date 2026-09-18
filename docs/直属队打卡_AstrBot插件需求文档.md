@@ -121,12 +121,12 @@ httpx
 
 ### 5.2 插件管理员
 
-插件维护独立管理员表，不直接等同于 AstrBot 全局管理员。
+插件维护独立管理员表，不直接等同于 AstrBot 全局管理员。管理员鉴权统一按 **QQ 号** 判定，学号不参与权限校验。
 
 初始管理员 QQ：
 
 ```text
-274734439
+2747344390
 ```
 
 初始化规则：
@@ -903,7 +903,7 @@ PROCESSING_ERROR
 
 | 配置 | 默认值 | 说明 |
 |---|---:|---|
-| `bootstrap_admin_qq` | `274734439` | 初始/恢复管理员 |
+| `bootstrap_admin_qq` | `2747344390` | 初始/恢复管理员 |
 | `nas_base_dir` | `/mnt/nas/direct_checkin` | 打卡文件根目录 |
 | `timezone` | `Asia/Shanghai` | 统计时区 |
 | `weekly_limit` | `2` | 每周自动计分上限 |

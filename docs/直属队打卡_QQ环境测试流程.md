@@ -56,6 +56,7 @@ from pathlib import Path
 
 Path("samples").mkdir(exist_ok=True)
 
+
 def make(name, paras, tables=0):
     d = docx.Document()
     for p in paras:
@@ -66,24 +67,36 @@ def make(name, paras, tables=0):
         t.cell(1, 0).text = "上传正常"
     d.save(f"samples/{name}")
 
-make("valid_1.docx", [
-    "学习内容：学习 FastAPI 依赖注入。",
-    "实践过程：把三个接口里重复的 Token 校验提取为统一依赖，并补充未登录与过期 Token 测试。",
-    "收获与下一步：理解了依赖嵌套，下一步把权限校验也拆成依赖。",
-], tables=1)
 
-make("valid_2_iterative.docx", [
-    "在昨天统一依赖的基础上，继续实现权限校验依赖。",
-    "新增 role 校验依赖并补了管理员/普通用户两种测试，修复了 403 未返回的问题。",
-])
+make(
+    "valid_1.docx",
+    [
+        "学习内容：学习 FastAPI 依赖注入。",
+        "实践过程：把三个接口里重复的 Token 校验提取为统一依赖，并补充未登录与过期 Token 测试。",
+        "收获与下一步：理解了依赖嵌套，下一步把权限校验也拆成依赖。",
+    ],
+    tables=1,
+)
+
+make(
+    "valid_2_iterative.docx",
+    [
+        "在昨天统一依赖的基础上，继续实现权限校验依赖。",
+        "新增 role 校验依赖并补了管理员/普通用户两种测试，修复了 403 未返回的问题。",
+    ],
+)
 
 make("invalid_empty.docx", ["打卡"])
 make("invalid_copied.docx", ["以下是从某教程复制的全部内容。" * 20])
-make("same_as_valid_1.docx", [
-    "学习内容：学习 FastAPI 依赖注入。",
-    "实践过程：把三个接口里重复的 Token 校验提取为统一依赖，并补充未登录与过期 Token 测试。",
-    "收获与下一步：理解了依赖嵌套，下一步把权限校验也拆成依赖。",
-], tables=1)
+make(
+    "same_as_valid_1.docx",
+    [
+        "学习内容：学习 FastAPI 依赖注入。",
+        "实践过程：把三个接口里重复的 Token 校验提取为统一依赖，并补充未登录与过期 Token 测试。",
+        "收获与下一步：理解了依赖嵌套，下一步把权限校验也拆成依赖。",
+    ],
+    tables=1,
+)
 ```
 
 要求：
