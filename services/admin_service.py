@@ -128,8 +128,14 @@ class AdminService:
         return T.admin_op_ok(T.target_display(user.name, user.student_id), display)
 
     async def skip(self, actor_qq: str, scope: str, reason: str, message_id: str) -> str:
-        scope = (scope or "").lower()
-        if scope not in {PauseScope.DAY.value, PauseScope.WEEK.value}:
+        aliases = {
+            "d": PauseScope.DAY.value,
+            "day": PauseScope.DAY.value,
+            "w": PauseScope.WEEK.value,
+            "week": PauseScope.WEEK.value,
+        }
+        scope = aliases.get((scope or "").strip().lower(), "")
+        if not scope:
             return T.admin_op_failed("暂停范围只能是 d 或 w")
         now_dt = now_utc()
         now = utc_iso(now_dt)

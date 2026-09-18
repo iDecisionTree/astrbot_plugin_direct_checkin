@@ -9,6 +9,7 @@ from astrbot_plugin_direct_checkin.repositories.submission_repo import Submissio
 from astrbot_plugin_direct_checkin.repositories.user_repo import UserRepository
 from astrbot_plugin_direct_checkin.services.admin_service import AdminService
 from astrbot_plugin_direct_checkin.services.file_service import FileService
+from astrbot_plugin_direct_checkin.utils.time_utils import now_utc, utc_iso
 
 NOW = "2026-01-01T00:00:00+00:00"
 SUPER = "2747344390"
@@ -52,6 +53,32 @@ def test_super_admin_cannot_be_removed(tmp_path: Path):
         removed = await service.remove_admin(SUPER, "111111111", "m2")
         assert "移除好啦" in removed
         assert await admins.is_admin("111111111") is False
+
+    asyncio.run(scenario())
+
+
+def test_skip_accepts_d_and_w_scope(tmp_path: Path):
+    async def scenario() -> None:
+        nas = tmp_path / "nas"
+        nas.mkdir()
+        _, repos, service = await _make_service(tmp_path, nas)
+        admins = repos["admin_repo"]
+        pauses = repos["pause_repo"]
+        await admins.add(SUPER, "bootstrap", NOW)
+
+        message_d = await service.skip(SUPER, "d", "系统维护", "m1")
+        assert "暂停" in message_d
+        active_day = await pauses.active(utc_iso(now_utc()))
+        assert active_day is not None and active_day.scope == "day"
+
+        await service.resume(SUPER, "m2")
+        message_w = await service.skip(SUPER, "w", "期中考试", "m3")
+        assert "暂停" in message_w
+        active_week = await pauses.active(utc_iso(now_utc()))
+        assert active_week is not None and active_week.scope == "week"
+
+        invalid = await service.skip(SUPER, "x", "", "m4")
+        assert "没改成功" in invalid
 
     asyncio.run(scenario())
 
