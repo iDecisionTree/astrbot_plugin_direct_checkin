@@ -42,6 +42,7 @@ _USER_HEADERS = [
     "累计自动有效计分次数",
     "累计额外有效提交数",
     "累计无效提交数",
+    "累计完成周数",
     "最后打卡时间",
 ]
 
@@ -132,8 +133,25 @@ class ExportService:
 
         user_by_id = {user.id: user for user in users}
         submissions_by_user: dict[int, list] = {user.id: [] for user in users}
+        auto_week_by_user: dict[int, dict[str, int]] = {}
+        adjust_week_by_user: dict[int, dict[str, int]] = {}
         for item in submissions:
             submissions_by_user.setdefault(item.user_id, []).append(item)
+            if item.status in _COUNTED and item.week_key:
+                bucket = auto_week_by_user.setdefault(item.user_id, {})
+                bucket[item.week_key] = bucket.get(item.week_key, 0) + 1
+        for item in adjustments:
+            bucket = adjust_week_by_user.setdefault(item.user_id, {})
+            bucket[item.week_key] = bucket.get(item.week_key, 0) + item.delta
+
+        def completed_week_count(target_user_id: int) -> int:
+            auto_weeks = auto_week_by_user.get(target_user_id, {})
+            adjust_weeks = adjust_week_by_user.get(target_user_id, {})
+            total_weeks = 0
+            for week in set(auto_weeks) | set(adjust_weeks):
+                if auto_weeks.get(week, 0) + adjust_weeks.get(week, 0) >= self.weekly_limit:
+                    total_weeks += 1
+            return total_weeks
 
         try:
             from openpyxl import Workbook
@@ -173,6 +191,7 @@ class ExportService:
                     counted_total,
                     extra_total,
                     invalid_total,
+                    completed_week_count(user.id),
                     format_beijing(parse_iso(user.last_submission_at), tz_name=self.timezone),
                 ]
             )

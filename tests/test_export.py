@@ -81,6 +81,9 @@ def test_export_workbook_structure(tmp_path: Path):
         assert summary["G2"].value == 1
         assert summary["H2"].value == 2
         assert summary["J2"].value == "是"
+        # 累计完成周数：本周有效计次 2，计 1 周。
+        assert summary["N1"].value == "累计完成周数"
+        assert summary["N2"].value == 1
 
         detail = workbook["打卡明细"]
         assert detail.max_row == 2
