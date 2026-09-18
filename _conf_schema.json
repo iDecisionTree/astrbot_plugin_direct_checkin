@@ -1,0 +1,95 @@
+{
+  "bootstrap_admin_qq": {
+    "description": "初始/恢复管理员 QQ",
+    "type": "string",
+    "default": "274734439",
+    "hint": "首次创建数据库时写入该 QQ 为管理员。若管理员表为空，也会用该值做一次恢复性初始化。"
+  },
+  "nas_base_dir": {
+    "description": "打卡文件根目录",
+    "type": "string",
+    "default": "/mnt/nas/direct_checkin",
+    "hint": "插件只会操作该目录内的内容，必须存在且可写，否则拒绝打卡。"
+  },
+  "timezone": {
+    "description": "统计时区",
+    "type": "string",
+    "default": "Asia/Shanghai"
+  },
+  "weekly_limit": {
+    "description": "每周自动计分上限",
+    "type": "int",
+    "default": 2
+  },
+  "max_file_size_mb": {
+    "description": "Word 文件大小上限（MiB）",
+    "type": "int",
+    "default": 20
+  },
+  "student_id_regex": {
+    "description": "学号校验正则",
+    "type": "string",
+    "default": "^\\d{6,20}$"
+  },
+  "name_max_length": {
+    "description": "姓名最大长度",
+    "type": "int",
+    "default": 30
+  },
+  "reason_max_length": {
+    "description": "暂停原因最大长度",
+    "type": "int",
+    "default": 100
+  },
+  "similarity_warn_threshold": {
+    "description": "进入历史对比的相似度阈值",
+    "type": "float",
+    "default": 0.85
+  },
+  "similarity_high_threshold": {
+    "description": "判定为高重复风险的相似度阈值",
+    "type": "float",
+    "default": 0.97
+  },
+  "similarity_max_chars": {
+    "description": "参与相似度计算的文本上限",
+    "type": "int",
+    "default": 20000
+  },
+  "history_compare_weeks": {
+    "description": "查重历史范围（周）",
+    "type": "int",
+    "default": 8
+  },
+  "ai_timeout_seconds": {
+    "description": "AI 审查超时时间（秒）",
+    "type": "int",
+    "default": 60
+  },
+  "ai_retry_count": {
+    "description": "AI 非法 JSON/临时失败重试次数",
+    "type": "int",
+    "default": 1
+  },
+  "ai_max_input_chars": {
+    "description": "AI 文本输入上限",
+    "type": "int",
+    "default": 24000
+  },
+  "export_keep_minutes": {
+    "description": "临时导出文件保留时间（分钟）",
+    "type": "int",
+    "default": 10
+  },
+  "enable_cross_user_exact_check": {
+    "description": "跨用户完全重复风险检测",
+    "type": "bool",
+    "default": true
+  },
+  "persona_mode": {
+    "description": "词九人格强度（v1 固定为 strong）",
+    "type": "string",
+    "default": "strong",
+    "options": ["strong"]
+  }
+}

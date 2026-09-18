@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# IDE
+.idea/
+
+# 插件本地数据（仅在不使用 AstrBot data 目录时的回退位置）
+/data/
