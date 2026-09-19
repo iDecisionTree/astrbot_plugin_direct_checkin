@@ -294,11 +294,14 @@ class CheckinService:
 
         # 4) AI 审查
         history_note = self._history_note(duplicate)
+        daily_position = await self.submission_repo.daily_participant_position(submission.id)
         ai_outcome = await self.ai_service.review(
             event.unified_msg_origin,
             text_for_ai(content, self.ai_max_input_chars),
             evidence_text(content),
             history_note,
+            daily_position=daily_position,
+            checkin_date=beijing_date,
         )
         if ai_outcome.error_code:
             await self.submission_repo.update(
@@ -339,13 +342,15 @@ class CheckinService:
         await self._audit(user, "checkin", submission.id, status, now_iso)
 
         if status == SubmissionStatus.VALID_COUNTED.value:
-            text = T.checkin_success(ai_outcome.brief_feedback, week_total, target)
+            text = T.checkin_success(ai_outcome.brief_feedback, week_total, target, daily_position)
             return CheckinResult(CheckinOutcome.COUNTED, text, status, week_total)
         if reason == "same_day":
             return CheckinResult(
-                CheckinOutcome.EXTRA, T.checkin_extra_same_day(), status, week_total
+                CheckinOutcome.EXTRA, T.checkin_extra_same_day(daily_position), status, week_total
             )
-        return CheckinResult(CheckinOutcome.EXTRA, T.checkin_extra(target), status, week_total)
+        return CheckinResult(
+            CheckinOutcome.EXTRA, T.checkin_extra(target, daily_position), status, week_total
+        )
 
     async def _load_previous_text(self, submission: Submission) -> str:
         if not submission.stored_path:

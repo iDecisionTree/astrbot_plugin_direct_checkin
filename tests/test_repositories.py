@@ -208,3 +208,35 @@ def test_reset_clears_checkin_data_but_keeps_admins(tmp_path: Path):
         assert await admins.is_admin("2747344390") is True
 
     asyncio.run(scenario())
+
+
+def test_daily_participant_order_is_unique_stable_and_per_day(tmp_path):
+    async def run():
+        db = Database(tmp_path / "daily.db")
+        await db.initialize()
+        users, repo = UserRepository(db), SubmissionRepository(db)
+        people = [
+            await users.create(str(i), f"2026000{i}", f"同学{i}", None, NOW) for i in range(6)
+        ]
+        await asyncio.gather(
+            *(
+                _make_pending(repo, user, f"first-{i}", "2026-09-20")
+                for i, user in enumerate(people)
+            )
+        )
+        positions = [await repo.daily_participant_position(f"first-{i}") for i in range(6)]
+        assert sorted(positions) == list(range(1, 7))
+        # 技术失败和同日重试不让已分配的序号移动或给同一用户另占一个号。
+        await repo.update("first-0", status="AI_ERROR")
+        await _make_pending(repo, people[0], "retry", "2026-09-20")
+        assert await repo.daily_participant_position("retry") == positions[0]
+        assert [await repo.daily_participant_position(f"first-{i}") for i in range(6)] == positions
+        # 重启保持序号；即使审核完成顺序相反，也不依赖完成时间。
+        await repo.update("first-5", status="VALID_EXTRA")
+        await db.initialize()
+        assert await SubmissionRepository(db).daily_participant_position("first-5") == positions[5]
+        await _make_pending(repo, people[0], "tomorrow", "2026-09-21")
+        assert await repo.daily_participant_position("tomorrow") == 1
+        assert await repo.daily_participant_position("missing") is None
+
+    asyncio.run(run())

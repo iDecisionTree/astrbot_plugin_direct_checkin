@@ -144,13 +144,29 @@ class AIReviewService:
         self.retry_count = max(0, retry_count)
         self.logger = logger
 
-    def build_prompt(self, document_text: str, evidence: str, history_note: str) -> str:
+    def build_prompt(
+        self,
+        document_text: str,
+        evidence: str,
+        history_note: str,
+        *,
+        daily_position: int | None = None,
+        checkin_date: str | None = None,
+    ) -> str:
+        data: dict[str, Any] = {
+            "document": document_text or "（无可提取文本）",
+            "evidence": evidence,
+            "history": history_note,
+        }
+        if daily_position is not None and checkin_date is not None:
+            data["checkin_context"] = {
+                "date": checkin_date,
+                "daily_position": daily_position,
+                "description": f"这位同学是全队今天第 {daily_position} 位来提交打卡材料的同学。",
+                "basis": "按当日首次材料入库顺序，每位同学只占一个序号；包含待审核及未通过的提交，不代表审核通过排名。",
+            }
         return json.dumps(
-            {
-                "document": document_text or "（无可提取文本）",
-                "evidence": evidence,
-                "history": history_note,
-            },
+            data,
             ensure_ascii=False,
         )
 
@@ -160,8 +176,17 @@ class AIReviewService:
         document_text: str,
         evidence: str,
         history_note: str,
+        *,
+        daily_position: int | None = None,
+        checkin_date: str | None = None,
     ) -> AIReviewOutcome:
-        prompt = self.build_prompt(document_text, evidence, history_note)
+        prompt = self.build_prompt(
+            document_text,
+            evidence,
+            history_note,
+            daily_position=daily_position,
+            checkin_date=checkin_date,
+        )
         try:
             provider_id = await self.context.get_current_chat_provider_id(umo=umo)
         except Exception as exc:  # noqa: BLE001

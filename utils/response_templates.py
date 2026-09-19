@@ -94,27 +94,44 @@ def checkin_success_first(feedback: str) -> str:
     return checkin_success(feedback, 1, 2)
 
 
-def checkin_success(feedback: str, count: int, target: int) -> str:
-    status = "本周已完成" if count >= target else "继续加油呀"
-    return f"打卡成功～本周 {count}/{target}，{status}。词九看过啦：{sanitize_feedback(feedback)}"
+def _daily_greeting(position: int | None) -> str:
+    if position is None:
+        return ""
+    return f"你是今天第 {position} 位来打卡的同学，词九记住啦～\n"
+
+
+def checkin_success(
+    feedback: str, count: int, target: int, daily_position: int | None = None
+) -> str:
+    status = "本周已完成，给你击个掌喵 (ฅ´ω`ฅ)" if count >= target else "又前进一点啦"
+    return (
+        f"{_daily_greeting(daily_position)}打卡成功～本周 {count}/{target}，{status}。\n"
+        f"词九看过啦：{sanitize_feedback(feedback)}"
+    )
 
 
 def checkin_success_complete(feedback: str) -> str:
     return checkin_success(feedback, 2, 2)
 
 
-def checkin_extra(target: int = 2) -> str:
-    return f"这次内容也通过啦～本周已经 {target}/{target}，词九会把它保存成额外学习记录，不再重复计次。"
+def checkin_extra(target: int = 2, daily_position: int | None = None) -> str:
+    return (
+        f"{_daily_greeting(daily_position)}这份进展词九也收好啦～本周已满 {target}/{target}，"
+        "本次记为有效额外材料，不增加计次喵。"
+    )
 
 
-def checkin_extra_same_day() -> str:
-    return "今天已经计过一次啦，同一自然日只计 1 次。这份词九会保存成额外学习记录，不再重复计次。"
+def checkin_extra_same_day(daily_position: int | None = None) -> str:
+    return (
+        f"{_daily_greeting(daily_position)}新进展词九收好啦～今天已计过 1 次，"
+        "这份作为有效额外材料保存，不增加计次喵。"
+    )
 
 
 def ai_rejected(feedback: str) -> str:
     return (
-        f"这次先不计次呀。词九看到的问题是：{sanitize_feedback(feedback)}。"
-        "补清楚实际做了什么、怎么验证，再来一次就好。"
+        f"这次先不计次呀，词九陪你补清楚：{sanitize_feedback(feedback)}。\n"
+        "写清实际做了什么、怎么验证，再来就好，不着急喵。"
     )
 
 

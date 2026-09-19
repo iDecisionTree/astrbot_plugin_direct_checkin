@@ -33,3 +33,15 @@ def test_count_templates():
     assert "1/2" in T.checkin_success_first("有进展")
     assert "2/2" in T.checkin_success_complete("有进展")
     assert "额外" in T.checkin_extra()
+
+
+def test_daily_greeting_preserves_counted_and_extra_semantics():
+    counted = T.checkin_success("异常测试补得很清楚喵", 2, 3, 7)
+    assert "第 7 位" in counted and "2/3" in counted
+    assert "本周已完成" not in counted
+    completed = T.checkin_success("有进展", 3, 3, 7)
+    assert "本周已完成" in completed and "3/3" in completed
+    for extra in (T.checkin_extra(3, 7), T.checkin_extra_same_day(7)):
+        assert "第 7 位" in extra and "额外材料" in extra and "不增加计次" in extra
+    assert "第 None" not in T.checkin_success("有进展", 1, 2)
+    assert "计次" in T.ai_rejected("请补充测试结果呀")

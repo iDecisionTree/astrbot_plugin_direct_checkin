@@ -248,3 +248,57 @@ def test_failed_pending_insert_removes_only_own_archive(plugin, tmp_path, monkey
         await app.terminate()
 
     asyncio.run(run())
+
+
+def test_entry_daily_order_matches_prompt_and_extra_reply(plugin, tmp_path, monkeypatch):
+    app, main = plugin
+    import json
+    from unittest.mock import AsyncMock
+
+    import docx
+
+    source = tmp_path / "daily.docx"
+
+    def document(text):
+        file = docx.Document()
+        file.add_paragraph(text)
+        file.save(source)
+
+    async def run():
+        await app.initialize()
+        await send(app, Event("/d 20260001 张三", "bind1", sender="10"))
+        await send(app, Event("/d 20260002 李四", "bind2", sender="11"))
+        before = datetime.fromisoformat("2026-09-20T15:59:59+00:00")
+        monkeypatch.setattr(main, "now_utc", lambda: before)
+        monkeypatch.setattr(
+            "astrbot_plugin_direct_checkin.services.checkin_service.now_utc",
+            lambda: datetime.fromisoformat("2026-09-20T16:05:00+00:00"),
+        )
+        model = AsyncMock(wraps=app.context.llm_generate)
+        monkeypatch.setattr(app.context, "llm_generate", model)
+        document("实现上传校验与边界测试，修复了空文件异常。")
+        first_event = Event(
+            "/d", "first", sender="10", chain=[Reply([File(str(source), "记录.docx")])]
+        )
+        first = await send(app, first_event)
+        assert "第 1 位" in first and "1/2" in first
+        assert await send(app, first_event) == first
+        assert model.await_count == 1
+        document("实现检索索引与性能测试，记录不同数据量的耗时和改进。")
+        second = await send(
+            app, Event("/d", "second", sender="11", chain=[Reply([File(str(source), "记录.docx")])])
+        )
+        assert "第 2 位" in second
+        document("新增缓存失效策略，并完成并发测试，解决旧数据未刷新的问题。")
+        extra = await send(
+            app, Event("/d", "extra", sender="10", chain=[Reply([File(str(source), "记录.docx")])])
+        )
+        assert "第 1 位" in extra and "额外材料" in extra
+        contexts = [
+            json.loads(call.kwargs["prompt"])["checkin_context"] for call in model.call_args_list
+        ]
+        assert [c["daily_position"] for c in contexts] == [1, 2, 1]
+        assert {c["date"] for c in contexts} == {"2026-09-20"}
+        await app.terminate()
+
+    asyncio.run(run())

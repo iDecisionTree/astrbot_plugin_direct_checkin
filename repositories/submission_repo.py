@@ -191,6 +191,31 @@ class SubmissionRepository:
 
         return await self.db.fetch(work)
 
+    async def daily_participant_position(self, submission_id: str) -> int | None:
+        """全队当天首次材料入库的用户序号，不是审核通过排名。
+
+        用 SQLite 插入顺序而非审核完成时间排序；同一用户重试或追加材料
+        沿用当日首次序号。一个查询取得一致快照，不做有竞争的 count + 1。
+        """
+
+        def work(conn):
+            row = conn.execute(
+                """WITH first_visits AS (
+                    SELECT user_id, MIN(rowid) AS first_row
+                    FROM submissions
+                    WHERE beijing_date=(SELECT beijing_date FROM submissions WHERE id=?)
+                    GROUP BY user_id
+                )
+                SELECT COUNT(*) FROM first_visits WHERE first_row <= (
+                    SELECT first_row FROM first_visits
+                    WHERE user_id=(SELECT user_id FROM submissions WHERE id=?)
+                )""",
+                (submission_id, submission_id),
+            ).fetchone()
+            return int(row[0]) or None
+
+        return await self.db.fetch(work)
+
     async def get_by_event(
         self, event_key: str, message_id: str, user_id: int, group_id: str | None
     ) -> Submission | None:
