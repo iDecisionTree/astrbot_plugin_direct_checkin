@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 from ..models.entities import Submission, User
 from ..models.enums import FINAL_STATUSES, DuplicateOutcome, DuplicateType
@@ -99,20 +101,23 @@ class DuplicateService:
                     continue
                 if not previous_text:
                     continue
-                score = similarity(normalized_text, previous_text, max_chars=self.max_chars)
+                score = await asyncio.to_thread(
+                    similarity, normalized_text, previous_text, max_chars=self.max_chars
+                )
                 if score > best_similarity:
                     best_similarity = score
                     best_submission = candidate
                     best_previous_text = previous_text
 
-        if best_submission and best_similarity >= self.high_threshold:
-            return DuplicateResult(
-                outcome=DuplicateOutcome.HARD,
-                duplicate_type=DuplicateType.HIGH_SIMILARITY,
-                duplicate_of=best_submission.id,
-                similarity=best_similarity,
+        if best_submission and best_similarity >= self.high_threshold and not cross:
+            return await asyncio.to_thread(
+                self._review_result,
+                best_submission,
+                best_similarity,
+                best_previous_text,
+                normalized_text,
+                True,
             )
-
         if cross:
             return DuplicateResult(
                 outcome=DuplicateOutcome.SUSPICIOUS,
@@ -127,12 +132,36 @@ class DuplicateService:
             )
 
         if best_submission and best_similarity >= self.warn_threshold:
-            return DuplicateResult(
-                outcome=DuplicateOutcome.OK,
-                duplicate_type=DuplicateType.NONE,
-                duplicate_of=best_submission.id,
-                similarity=best_similarity,
-                previous_summary=truncate(best_previous_text, _PREVIOUS_SUMMARY_CHARS),
+            return await asyncio.to_thread(
+                self._review_result,
+                best_submission,
+                best_similarity,
+                best_previous_text,
+                normalized_text,
+                False,
             )
 
         return DuplicateResult(outcome=DuplicateOutcome.OK, duplicate_type=DuplicateType.NONE)
+
+    @staticmethod
+    def _review_result(previous, score, old, new, high):
+        old_lines, new_lines = old.splitlines(), new.splitlines()
+        changes, context = [], []
+        for tag, i, j, a, b in SequenceMatcher(
+            None, old_lines, new_lines, autojunk=True
+        ).get_opcodes():
+            if tag != "equal":
+                changes.extend(new_lines[a:b])
+                context.extend(old_lines[max(0, i - 1) : min(len(old_lines), j + 1)])
+        note = (
+            f"与本人历史材料相似度 {score:.1%}，请判断新增进展，不要仅凭相似度拒绝。\n"
+            f"历史相关段落：\n{truncate(chr(10).join(context) or old, 1500)}\n"
+            f"本次新增或修改段落：\n{truncate(chr(10).join(changes) or new[-1500:], 3000)}"
+        )
+        return DuplicateResult(
+            DuplicateOutcome.SUSPICIOUS if high else DuplicateOutcome.OK,
+            DuplicateType.HIGH_SIMILARITY if high else DuplicateType.NONE,
+            previous.id,
+            score,
+            note=note,
+        )

@@ -87,19 +87,24 @@ def download_failed() -> str:
 
 
 def processing_error() -> str:
-    return "词九处理这次打卡时遇到了点技术问题，先没有计次。请稍后重试，或联系管理员查看日志。"
+    return "词九处理这条请求时遇到了技术问题。请联系管理员核对处理结果和日志，再决定是否使用新消息重试。"
 
 
 def checkin_success_first(feedback: str) -> str:
-    return f"打卡成功～本周 1/2。词九看过啦：{sanitize_feedback(feedback)}"
+    return checkin_success(feedback, 1, 2)
+
+
+def checkin_success(feedback: str, count: int, target: int) -> str:
+    status = "本周已完成" if count >= target else "继续加油呀"
+    return f"打卡成功～本周 {count}/{target}，{status}。词九看过啦：{sanitize_feedback(feedback)}"
 
 
 def checkin_success_complete(feedback: str) -> str:
-    return f"打卡成功，本周 2/2 啦 (≧▽≦)  {sanitize_feedback(feedback)}"
+    return checkin_success(feedback, 2, 2)
 
 
-def checkin_extra() -> str:
-    return "这次内容也通过啦～本周已经 2/2，词九会把它保存成额外学习记录，不再重复计次。"
+def checkin_extra(target: int = 2) -> str:
+    return f"这次内容也通过啦～本周已经 {target}/{target}，词九会把它保存成额外学习记录，不再重复计次。"
 
 
 def checkin_extra_same_day() -> str:
@@ -153,12 +158,14 @@ def no_permission() -> str:
     return "这个命令只有插件管理员能用呀。普通打卡命令可以发 /d help 查看。"
 
 
-def admin_op_ok(target_display: str, count: int) -> str:
-    return f"处理完成：{target_display} 当前周已调整为 {count}/2。"
+def admin_op_ok(target_display: str, count: int, target: int = 2) -> str:
+    return f"词九处理完成：{target_display} 当前周已调整为 {count}/{target}。"
 
 
-def admin_op_ok_extra(target_display: str) -> str:
-    return f"处理完成：{target_display} 本周已满 2/2，这次记为额外，不计入每周次数。"
+def admin_op_ok_extra(target_display: str, target: int = 2) -> str:
+    return (
+        f"词九处理完成：{target_display} 本周已满 {target}/{target}，这次记为额外，不计入每周次数。"
+    )
 
 
 def admin_op_failed(reason: str = "") -> str:
@@ -193,7 +200,7 @@ def resume_none() -> str:
 def reset_confirm_required() -> str:
     return (
         "重置会清空所有用户绑定、打卡提交、人工调整、暂停记录与审计日志，"
-        "并删除归档目录里的全部 Word 文件。\n"
+        "并删除专用归档目录里的全部文件。\n"
         "确认要重置请发送：/d reset confirm（需连续发送两次）"
     )
 
@@ -210,7 +217,7 @@ def reset_done(users: int, submissions: int, adjustments: int, pauses: int, file
 
 
 def reset_failed() -> str:
-    return "重置没成功呀，词九已经把异常记下来了。数据未被清空。"
+    return "重置未完成，词九已保留恢复日志。请检查日志，确认数据和文件的实际状态后再重试。"
 
 
 def admin_super_protected() -> str:
@@ -223,14 +230,14 @@ def unknown_command(is_admin: bool = False) -> str:
     return "这个子命令词九不认识呢。发 /d help 看看能做什么吧。"
 
 
-def normal_help() -> str:
+def normal_help(target: int = 2) -> str:
     return (
         "词九的打卡小助手在这儿～\n"
         "/d 学号 姓名  首次绑定\n"
         "/d            引用 .docx 后打卡\n"
         "/d help       查看普通帮助\n"
         "\n"
-        "一周要完成 2 次有效打卡呀。"
+        f"本周要完成 {target} 次有效打卡呀；同一天最多计 1 次。"
     )
 
 
@@ -253,7 +260,8 @@ def admin_help() -> str:
         "/d resume             恢复接收\n"
         "/d get [学号/QQ]      导出 Excel\n"
         "/d stat               当前周统计\n"
-        "/d reset              重置所有打卡数据（需 /d reset confirm）"
+        "/d reset              重置所有打卡数据（需两次独立的 /d reset confirm）\n"
+        "学号与 QQ 冲突时，请使用 sid:学号 或 qq:QQ号。"
     )
 
 
@@ -280,9 +288,7 @@ def export_failed() -> str:
 
 
 def stat_normal(total: int, completed: int, one: int, zero: int) -> str:
-    return (
-        f"词九统计好啦～本周共 {total} 人：已完成 {completed} 人，1 次 {one} 人，0 次 {zero} 人。"
-    )
+    return f"词九统计好啦～本周共 {total} 人：已完成 {completed} 人，进行中 {one} 人，未开始 {zero} 人。"
 
 
 def stat_paused(total: int, reason: str = "") -> str:

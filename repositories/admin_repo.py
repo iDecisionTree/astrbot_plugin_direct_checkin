@@ -109,6 +109,7 @@ class AdminRepository:
             _count_counted_adjustments,
             _count_counted_submissions,
             _count_manual_negatives,
+            next_sequence,
         )
 
         def work(conn: sqlite3.Connection) -> tuple[CountAdjustment, bool, int]:
@@ -118,7 +119,7 @@ class AdminRepository:
             current = max(0, auto_counted + manual_counted - manual_negatives)
             if current < weekly_limit:
                 counted = 1
-                slot: int | None = current + 1
+                slot: int | None = next_sequence(conn, user_id, week_key)
                 total = current + 1
             else:
                 counted = 0
@@ -148,6 +149,45 @@ class AdminRepository:
             return CountAdjustment.from_row(row), bool(counted), total
 
         return await self.db.transaction(work, immediate=True)
+
+    async def deduct(
+        self, user_id: int, week_key: str, date: str, limit: int, actor: str, now: str
+    ) -> int | None:
+        from .submission_repo import (
+            _count_counted_adjustments,
+            _count_counted_submissions,
+            _count_manual_negatives,
+        )
+
+        def work(conn):
+            current = max(
+                0,
+                _count_counted_submissions(conn, user_id, week_key)
+                + _count_counted_adjustments(conn, user_id, week_key)
+                - _count_manual_negatives(conn, user_id, week_key),
+            )
+            if current <= 0:
+                return None
+            conn.execute(
+                "INSERT INTO count_adjustments (user_id,week_key,delta,admin_qq,created_at,beijing_date) VALUES (?,?,-1,?,?,?)",
+                (user_id, week_key, actor, now, date),
+            )
+            return min(limit, current - 1)
+
+        return await self.db.transaction(work)
+
+    async def remove_protected(self, qq_id: str, super_admin: str) -> str:
+        def work(conn):
+            if not conn.execute("SELECT 1 FROM admins WHERE qq_id=?", (qq_id,)).fetchone():
+                return "missing"
+            if qq_id == super_admin:
+                return "protected"
+            if conn.execute("SELECT COUNT(*) FROM admins").fetchone()[0] <= 1:
+                return "last"
+            conn.execute("DELETE FROM admins WHERE qq_id=?", (qq_id,))
+            return "removed"
+
+        return await self.db.transaction(work)
 
     async def count_counted_in_week(self, user_id: int, week_key: str) -> int:
         def work(conn: sqlite3.Connection) -> int:

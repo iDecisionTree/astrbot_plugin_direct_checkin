@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -47,7 +48,7 @@ class AIReviewOutcome:
 def parse_ai_response(raw: str) -> dict[str, Any]:
     """从模型输出中提取 JSON 对象，失败抛出 ValueError。"""
 
-    if not raw or not raw.strip():
+    if not isinstance(raw, str) or not raw.strip():
         raise ValueError("empty response")
     text = _CODE_FENCE.sub("", raw.strip())
     text = text.replace("```", "").strip()
@@ -62,6 +63,9 @@ def parse_ai_response(raw: str) -> dict[str, Any]:
 
 
 def normalize_ai_data(data: dict[str, Any]) -> AIReviewOutcome:
+    for key in ("decision", "progress", "duplicate_assessment", "brief_feedback"):
+        if key in data and not isinstance(data[key], str):
+            raise ValueError(f"invalid {key} type")
     decision = str(data.get("decision", "")).strip().lower()
     if decision not in _DECISIONS:
         raise ValueError("invalid decision")
@@ -74,12 +78,24 @@ def normalize_ai_data(data: dict[str, Any]) -> AIReviewOutcome:
     if assessment not in _ASSESSMENT:
         assessment = "uncertain"
 
+    for key in ("has_learning_content", "has_practice", "has_reflection"):
+        if key in data and not isinstance(data[key], bool):
+            raise ValueError(f"invalid {key} type")
+    if "reasons" in data and (
+        not isinstance(data["reasons"], list)
+        or any(not isinstance(item, str) for item in data["reasons"])
+    ):
+        raise ValueError("invalid reasons type")
+
     confidence: float | None
-    try:
-        confidence = float(data.get("confidence"))
+    confidence = None
+    if data.get("confidence") is not None:
+        if not isinstance(data["confidence"], (int, float)) or isinstance(data["confidence"], bool):
+            raise ValueError("invalid confidence type")
+        confidence = float(data["confidence"])
+        if not math.isfinite(confidence):
+            raise ValueError("invalid confidence")
         confidence = min(1.0, max(0.0, confidence))
-    except (TypeError, ValueError):
-        confidence = None
 
     reasons_raw = data.get("reasons")
     reasons: list[str] = []
@@ -129,10 +145,13 @@ class AIReviewService:
         self.logger = logger
 
     def build_prompt(self, document_text: str, evidence: str, history_note: str) -> str:
-        return (
-            self.template.replace("__DOCUMENT__", document_text or "（无可提取文本）")
-            .replace("__EVIDENCE__", evidence or "（无）")
-            .replace("__HISTORY__", history_note or "（无）")
+        return json.dumps(
+            {
+                "document": document_text or "（无可提取文本）",
+                "evidence": evidence,
+                "history": history_note,
+            },
+            ensure_ascii=False,
         )
 
     async def review(
@@ -166,7 +185,11 @@ class AIReviewService:
                 )
             try:
                 response = await asyncio.wait_for(
-                    self.context.llm_generate(chat_provider_id=provider_id, prompt=current_prompt),
+                    self.context.llm_generate(
+                        chat_provider_id=provider_id,
+                        prompt=current_prompt,
+                        system_prompt=self.template.split("========")[0],
+                    ),
                     timeout=self.timeout_seconds,
                 )
             except asyncio.TimeoutError:

@@ -131,8 +131,8 @@ def test_export_not_paused_after_resume(tmp_path: Path):
         headers = [cell.value for cell in summary[1]]
         row = [cell.value for cell in summary[2]]
         data = dict(zip(headers, row, strict=True))
-        assert data["当前周是否完成"] != "暂停周"
-        assert data["当前周应打卡次数"] == 2
+        assert data["本周状态"] != "暂停周"
+        assert data["本周目标"] == 2
 
     asyncio.run(scenario())
 

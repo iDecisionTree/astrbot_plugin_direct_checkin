@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import timedelta
 
 from ..models.entities import User
 from ..models.enums import PauseScope
@@ -14,6 +15,7 @@ from ..repositories.pause_repo import PauseRepository
 from ..repositories.submission_repo import SubmissionRepository
 from ..repositories.user_repo import UserRepository
 from ..utils import response_templates as T
+from ..utils.request_context import received_at
 from ..utils.scoring import week_counted as compute_week_counted
 from ..utils.time_utils import (
     day_end_beijing,
@@ -21,9 +23,10 @@ from ..utils.time_utils import (
     to_beijing,
     utc_iso,
     week_end_beijing,
-    week_key_now,
+    week_key_of,
 )
 from .file_service import FileService
+from .reset_service import ResetService
 
 _DIGITS = re.compile(r"^\d+$")
 
@@ -45,6 +48,7 @@ class AdminService:
         weekly_limit: int,
         timezone: str,
         super_admin_qq: str = "",
+        reason_max_length: int = 100,
     ) -> None:
         self.admin_repo = admin_repo
         self.user_repo = user_repo
@@ -56,7 +60,9 @@ class AdminService:
         self.weekly_limit = max(1, weekly_limit)
         self.timezone = timezone
         self.super_admin_qq = (super_admin_qq or "").strip()
-        self._reset_pending: dict[str, float] = {}
+        self._reset_pending: dict[str, tuple[float, str]] = {}
+        self.reason_max_length = reason_max_length
+        self.reset_service = ResetService(db, file_service)
 
     async def is_admin(self, qq: str) -> bool:
         return await self.admin_repo.is_admin(qq)
@@ -65,7 +71,7 @@ class AdminService:
         target_qq = (target_qq or "").strip()
         if not _DIGITS.match(target_qq):
             return T.admin_op_failed("QQ 号必须是纯数字")
-        now = utc_iso(now_utc())
+        now = utc_iso(received_at.get() or now_utc())
         inserted = await self.admin_repo.add(target_qq, actor_qq, now)
         await self._audit(
             actor_qq, "admin_add", target_qq, message_id, "ok" if inserted else "exists", now
@@ -76,27 +82,21 @@ class AdminService:
         target_qq = (target_qq or "").strip()
         if not _DIGITS.match(target_qq):
             return T.admin_op_failed("QQ 号必须是纯数字")
-        if not await self.admin_repo.is_admin(target_qq):
-            return T.admin_not_found_admin(target_qq)
-        if self.super_admin_qq and target_qq == self.super_admin_qq:
-            await self._audit(
-                actor_qq,
-                "admin_remove",
-                target_qq,
-                message_id,
-                "super_protected",
-                utc_iso(now_utc()),
-            )
-            return T.admin_super_protected()
-        if await self.admin_repo.count() <= 1:
-            await self._audit(
-                actor_qq, "admin_remove", target_qq, message_id, "last_one", utc_iso(now_utc())
-            )
-            return T.admin_last_one()
-        now = utc_iso(now_utc())
-        await self.admin_repo.remove(target_qq)
-        await self._audit(actor_qq, "admin_remove", target_qq, message_id, "ok", now)
-        return T.admin_removed(target_qq)
+        result = await self.admin_repo.remove_protected(target_qq, self.super_admin_qq)
+        await self._audit(
+            actor_qq,
+            "admin_remove",
+            target_qq,
+            message_id,
+            result,
+            utc_iso(received_at.get() or now_utc()),
+        )
+        return {
+            "missing": T.admin_not_found_admin,
+            "protected": lambda _: T.admin_super_protected(),
+            "last": lambda _: T.admin_last_one(),
+            "removed": T.admin_removed,
+        }[result](target_qq)
 
     async def adjust(self, actor_qq: str, target_value: str, delta: int, message_id: str) -> str:
         target_value = (target_value or "").strip()
@@ -104,23 +104,24 @@ class AdminService:
             return T.admin_op_failed("请提供学号或 QQ")
         user, conflict = await self.user_repo.resolve_identifier(target_value)
         if conflict:
-            return T.admin_op_failed("这个数字同时匹配到不同用户，请改用学号")
+            return T.admin_op_failed("这个数字同时匹配到不同用户，请使用 sid:学号 或 qq:QQ号")
         if user is None:
             return T.admin_op_failed("没有找到对应用户")
 
-        now_dt = now_utc()
-        week_key = week_key_now(self.timezone)
+        now_dt = received_at.get() or now_utc()
+        week_key = week_key_of(now_dt, self.timezone)
         beijing_date = to_beijing(now_dt, self.timezone).strftime("%Y-%m-%d")
         now = utc_iso(now_dt)
         target_display = T.target_display(user.name, user.student_id)
+        target = await self.db.weekly_target(week_key, self.weekly_limit)
 
         if delta > 0:
-            # 人工 +1 与自动打卡共享每周 2 次槽位，超出记为额外。
+            # 人工 +1 与自动打卡共享本周目标额度，超出记为额外。
             _adjustment, counted, week_total = await self.admin_repo.allocate_positive_adjustment(
                 user.id,
                 week_key,
                 beijing_date,
-                self.weekly_limit,
+                target,
                 actor_qq,
                 now,
             )
@@ -134,14 +135,12 @@ class AdminService:
                 target_type="user",
             )
             if counted:
-                return T.admin_op_ok(target_display, min(week_total, self.weekly_limit))
-            return T.admin_op_ok_extra(target_display)
+                return T.admin_op_ok(target_display, week_total, target)
+            return T.admin_op_ok_extra(target_display, target)
 
-        current = await self._effective_count(user, week_key)
-        if current <= 0:
+        total = await self.admin_repo.deduct(user.id, week_key, beijing_date, target, actor_qq, now)
+        if total is None:
             return T.admin_op_failed("当前周计次已经是 0，不能再减少")
-        await self.admin_repo.add_adjustment(user.id, week_key, -1, actor_qq, now, beijing_date)
-        total = max(0, current - 1)
         await self._audit(
             actor_qq,
             "count_adjust",
@@ -151,9 +150,11 @@ class AdminService:
             now,
             target_type="user",
         )
-        return T.admin_op_ok(target_display, min(total, self.weekly_limit))
+        return T.admin_op_ok(target_display, total, target)
 
     async def skip(self, actor_qq: str, scope: str, reason: str, message_id: str) -> str:
+        if len(reason) > self.reason_max_length:
+            return T.admin_op_failed(f"暂停原因不能超过 {self.reason_max_length} 个字符")
         aliases = {
             "d": PauseScope.DAY.value,
             "day": PauseScope.DAY.value,
@@ -163,13 +164,13 @@ class AdminService:
         scope = aliases.get((scope or "").strip().lower(), "")
         if not scope:
             return T.admin_op_failed("暂停范围只能是 d 或 w")
-        now_dt = now_utc()
+        now_dt = received_at.get() or now_utc()
         now = utc_iso(now_dt)
         if scope == PauseScope.DAY.value:
-            end = day_end_beijing(now_dt, self.timezone)
+            end = day_end_beijing(now_dt, self.timezone) + timedelta(microseconds=1)
             exemption = None
         else:
-            week_key = week_key_now(self.timezone)
+            week_key = week_key_of(now_dt, self.timezone)
             end = week_end_beijing(week_key, self.timezone)
             exemption = week_key
         await self.pause_repo.create(
@@ -192,49 +193,40 @@ class AdminService:
         """
 
         now_monotonic = time.monotonic()
-        pending_at = self._reset_pending.get(actor_qq)
+        pending = self._reset_pending.get(actor_qq)
+        pending_at = pending[0] if pending else None
         if not confirm:
             self._reset_pending.pop(actor_qq, None)
             return T.reset_confirm_required()
         if pending_at is None or now_monotonic - pending_at > _RESET_CONFIRM_TTL:
-            self._reset_pending[actor_qq] = now_monotonic
+            self._reset_pending[actor_qq] = (now_monotonic, message_id)
             return T.reset_confirm_again()
 
-        # 第二次 confirm：真正执行。
+        if pending and pending[1] == message_id:
+            return T.reset_confirm_again()
         self._reset_pending.pop(actor_qq, None)
-        try:
-            counts = await self.db.reset_checkin_data()
-            file_stats = await self.file_service.purge_all()
-        except Exception:  # noqa: BLE001 - 重置失败不得静默
-            await self._audit(
-                actor_qq,
-                "reset_all",
-                "database",
-                message_id,
-                "failed",
-                utc_iso(now_utc()),
-                target_type="system",
-            )
-            return T.reset_failed()
+        counts, result = await self.reset_service.execute()
         await self._audit(
             actor_qq,
             "reset_all",
             "database",
             message_id,
-            "ok",
-            utc_iso(now_utc()),
+            "ok" if counts is not None else str(result),
+            utc_iso(received_at.get() or now_utc()),
             target_type="system",
         )
+        if counts is None:
+            return str(result)
         return T.reset_done(
             counts.get("users", 0),
             counts.get("submissions", 0),
             counts.get("count_adjustments", 0),
             counts.get("pause_periods", 0),
-            file_stats.get("files", 0),
+            result,
         )
 
     async def resume(self, actor_qq: str, message_id: str) -> str:
-        now = utc_iso(now_utc())
+        now = utc_iso(received_at.get() or now_utc())
         rowcount = await self.pause_repo.resume_active(now)
         await self._audit(
             actor_qq, "resume", "pause", message_id, "ok" if rowcount else "none", now
@@ -250,7 +242,8 @@ class AdminService:
         auto = await self.submission_repo.count_auto_counted(user.id, week_key)
         manual_counted = await self.admin_repo.count_counted_in_week(user.id, week_key)
         manual_negatives = await self.admin_repo.count_negatives_in_week(user.id, week_key)
-        return compute_week_counted(auto, manual_counted, manual_negatives, self.weekly_limit)
+        target = await self.db.weekly_target(week_key, self.weekly_limit)
+        return compute_week_counted(auto, manual_counted, manual_negatives, target)
 
     async def _audit(
         self,

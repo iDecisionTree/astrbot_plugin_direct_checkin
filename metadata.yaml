@@ -2,7 +2,7 @@ name: astrbot_plugin_direct_checkin # 插件唯一识别名
 display_name: 直属队学习打卡 # 插件展示名
 short_desc: 直属队 Word 学习打卡、查重与 AI 审查
 desc: 支撑直属队学习打卡的 QQ 用户绑定、Word 归档、重复检测、AI 有效性审查、每周计次、暂停、管理员维护、Excel 导出与统计。
-version: v1.0.0
+version: v1.1.0
 author: iDecisionTree
 repo: https://github.com/iDecisionTree/astrbot_plugin_direct_checkin
 support_platforms:

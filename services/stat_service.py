@@ -1,29 +1,22 @@
-"""本周统计与饼图生成。"""
+"""本周统计卡片：服务器端无界面绘制，失败回退文字。"""
 
 from __future__ import annotations
 
+import asyncio
+import os
+import textwrap
+import threading
+import uuid
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
-from typing import Any
 
-from ..repositories.admin_repo import AdminRepository
-from ..repositories.pause_repo import PauseRepository
-from ..repositories.submission_repo import SubmissionRepository
-from ..repositories.user_repo import UserRepository
 from ..utils import response_templates as T
-from ..utils.scoring import week_counted as compute_week_counted
-from ..utils.time_utils import week_key_now
+from ..utils import visual_style as V
+from ..utils.time_utils import parse_week_key, to_beijing
+from .report_service import ReportService, ReportSnapshot
 
-_CJK_FONT_CANDIDATES = (
-    "Microsoft YaHei",
-    "SimHei",
-    "Noto Sans CJK SC",
-    "Noto Sans CJK JP",
-    "Source Han Sans SC",
-    "WenQuanYi Zen Hei",
-    "PingFang SC",
-    "Arial Unicode MS",
-)
+_RENDER_LOCK = threading.Lock()
 
 
 @dataclass(slots=True)
@@ -37,110 +30,174 @@ class StatService:
     def __init__(
         self,
         *,
-        user_repo: UserRepository,
-        submission_repo: SubmissionRepository,
-        admin_repo: AdminRepository,
-        pause_repo: PauseRepository,
-        image_dir: Path,
-        weekly_limit: int,
-        timezone: str,
-        logger: Any,
-    ) -> None:
-        self.user_repo = user_repo
-        self.submission_repo = submission_repo
-        self.admin_repo = admin_repo
-        self.pause_repo = pause_repo
-        self.image_dir = Path(image_dir)
-        self.weekly_limit = max(1, weekly_limit)
-        self.timezone = timezone
-        self.logger = logger
+        user_repo,
+        submission_repo,
+        admin_repo,
+        pause_repo,
+        image_dir,
+        weekly_limit,
+        timezone,
+        logger,
+    ):
+        self.report = ReportService(user_repo.db, weekly_limit, timezone)
+        self.image_dir, self.timezone, self.logger = Path(image_dir), timezone, logger
+        self._semaphore = asyncio.Semaphore(1)
 
     async def stat(self) -> StatBundle:
-        week_key = week_key_now(self.timezone)
-        users = await self.user_repo.list_users(active_only=True)
-        total = len(users)
+        snapshot = await self.report.snapshot()
+        if snapshot.paused:
+            text = T.stat_paused(snapshot.total, snapshot.reason)
+        else:
+            text = T.stat_normal(snapshot.total, *snapshot.counts)
+        text += f"\n考核周：{snapshot.week_key} 起，每人目标 {snapshot.target} 次。"
+        try:
+            async with self._semaphore:
+                path = await asyncio.to_thread(self.render, snapshot)
+        except Exception:
+            self.logger.exception("统计卡片生成失败，保留文字统计")
+            path = None
+        return StatBundle(text, path, snapshot.paused)
 
-        exemption = await self.pause_repo.exempted_week(week_key)
-        if exemption is not None:
-            return StatBundle(
-                text=T.stat_paused(total, exemption.reason), image_path=None, paused=True
-            )
-        if total == 0:
-            return StatBundle(text=T.stat_normal(0, 0, 0, 0), image_path=None)
+    def render(self, snapshot: ReportSnapshot) -> Path:
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+        from matplotlib.font_manager import FontProperties
+        from matplotlib.patches import FancyBboxPatch
 
-        auto_by_user = await self.submission_repo.count_auto_counted_by_week(week_key)
-        manual_counted_by_user = await self.admin_repo.count_counted_by_week(week_key)
-        manual_neg_by_user = await self.admin_repo.count_negatives_by_week(week_key)
+        with _RENDER_LOCK:
+            font = FontProperties(fname=str(V.FONT_PATH))
+            figure = Figure(figsize=(10, 7), dpi=150, facecolor=V.PALE)
+            FigureCanvasAgg(figure)
+            panel = figure.add_axes([0, 0, 1, 1])
+            panel.set_axis_off()
 
-        completed = one = zero = 0
-        for user in users:
-            effective = compute_week_counted(
-                auto_by_user.get(user.id, 0),
-                manual_counted_by_user.get(user.id, 0),
-                manual_neg_by_user.get(user.id, 0),
-                self.weekly_limit,
-            )
-            if effective >= self.weekly_limit:
-                completed += 1
-            elif effective == 1:
-                one += 1
+            def box(x, y, width, height, color="white"):
+                panel.add_patch(
+                    FancyBboxPatch(
+                        (x, y),
+                        width,
+                        height,
+                        boxstyle="round,pad=0.008,rounding_size=0.022",
+                        linewidth=0,
+                        facecolor=color,
+                        transform=panel.transAxes,
+                    )
+                )
+
+            def text(x, y, value, size=12, color=V.NAVY, **kwargs):
+                figure.text(
+                    x,
+                    y,
+                    str(value),
+                    fontproperties=font,
+                    fontsize=size,
+                    color=color,
+                    va="center",
+                    **kwargs,
+                )
+
+            monday = parse_week_key(snapshot.week_key)
+            end = monday + timedelta(days=6)
+            text(0.055, 0.925, "直属队 · 本周学习打卡", 24)
+            text(0.055, 0.862, f"{monday:%Y.%m.%d} — {end:%m.%d}", 12, V.MUTED)
+            text(0.94, 0.866, f"每人目标 {snapshot.target} 次", 12, V.BLUE, ha="right")
+            completed, ongoing, zero = snapshot.counts
+            box(0.05, 0.635, 0.9, 0.165)
+            kpis = [
+                ("参与人数", f"{snapshot.total}", "人"),
+                (
+                    "本周状态" if snapshot.paused else "完成率",
+                    "暂停"
+                    if snapshot.paused
+                    else f"{completed / snapshot.total:.0%}"
+                    if snapshot.total
+                    else "—",
+                    "",
+                ),
+                (
+                    "考核要求",
+                    "豁免" if snapshot.paused else str(snapshot.target),
+                    "" if snapshot.paused else "次 / 人",
+                ),
+            ]
+            for x, (label, value, unit) in zip((0.085, 0.385, 0.685), kpis, strict=True):
+                text(x, 0.756, label, 11, V.MUTED)
+                text(x, 0.685, value, 27, V.TEAL if label == "完成率" else V.NAVY)
+                text(x + 0.14, 0.678, unit, 10, V.MUTED)
+            box(0.05, 0.115, 0.9, 0.465)
+            if snapshot.paused or snapshot.total == 0:
+                text(
+                    0.5,
+                    0.43,
+                    "本周暂停考核" if snapshot.paused else "等待第一位同学加入",
+                    23,
+                    V.BLUE,
+                    ha="center",
+                )
+                message = snapshot.reason or (
+                    "本周不按缺卡处理，已有学习记录保留。"
+                    if snapshot.paused
+                    else "同学绑定后，词九会在这里展示本周进度。"
+                )
+                wrapped = textwrap.wrap(message, width=36)
+                if len(wrapped) > 3:
+                    wrapped = wrapped[:3]
+                    wrapped[-1] += "…"
+                text(0.5, 0.295, "\n".join(wrapped), 13, V.MUTED, ha="center", linespacing=1.6)
             else:
-                zero += 1
-
-        text = T.stat_normal(total, completed, one, zero)
-        image_path = await self._render_pie(completed, one, zero)
-        return StatBundle(text=text, image_path=image_path)
-
-    async def _render_pie(self, completed: int, one: int, zero: int) -> Path | None:
-        try:
-            import matplotlib
-
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-        except Exception as exc:  # noqa: BLE001
-            self.logger.warning("matplotlib 不可用，跳过饼图: %s", exc)
-            return None
-
-        font_name = self._pick_cjk_font(matplotlib)
-        if font_name:
-            plt.rcParams["font.sans-serif"] = [font_name, "DejaVu Sans"]
-        plt.rcParams["axes.unicode_minus"] = False
-
-        labels = ["0 次", "1 次", "2 次及以上"]
-        sizes = [zero, one, completed]
-        filtered = [(label, size) for label, size in zip(labels, sizes, strict=True) if size > 0]
-        if not filtered:
-            return None
-        chart_labels = [item[0] for item in filtered]
-        chart_sizes = [item[1] for item in filtered]
-
-        try:
-            figure, axis = plt.subplots(figsize=(4.2, 4.2), dpi=150)
-            axis.pie(
-                chart_sizes,
-                labels=chart_labels,
-                autopct=lambda value: f"{value:.0f}%",
-                startangle=90,
+                axis = figure.add_axes([0.085, 0.18, 0.34, 0.34])
+                values = [completed, ongoing, zero]
+                axis.pie(
+                    values,
+                    colors=[V.TEAL, V.BLUE, V.ZERO],
+                    startangle=90,
+                    counterclock=False,
+                    wedgeprops={"width": 0.19, "edgecolor": "white", "linewidth": 3},
+                )
+                axis.set_aspect("equal")
+                text(0.255, 0.365, f"{completed / snapshot.total:.0%}", 29, V.TEAL, ha="center")
+                text(0.255, 0.307, "本周已完成", 11, V.MUTED, ha="center")
+                for y, label, count, color in zip(
+                    (0.46, 0.34, 0.22),
+                    ("已完成", "进行中", "未开始"),
+                    values,
+                    (V.TEAL, V.BLUE, V.ZERO),
+                    strict=True,
+                ):
+                    panel.plot(
+                        [0.504],
+                        [y],
+                        marker="o",
+                        markersize=9,
+                        color=color,
+                        transform=panel.transAxes,
+                    )
+                    text(0.53, y, label, 15)
+                    text(
+                        0.785,
+                        y,
+                        f"{count} 人",
+                        18,
+                        V.MUTED if label == "未开始" else color,
+                        ha="right",
+                    )
+                    text(0.905, y, f"{count / snapshot.total:.1%}", 11, V.MUTED, ha="right")
+            text(0.055, 0.055, "词九的学习记录  /  额外材料不抵扣其他周缺卡", 9, V.MUTED)
+            text(
+                0.945,
+                0.055,
+                to_beijing(snapshot.generated_at, self.timezone).strftime("%m-%d %H:%M"),
+                9,
+                V.MUTED,
+                ha="right",
             )
-            axis.axis("equal")
             self.image_dir.mkdir(parents=True, exist_ok=True)
-            path = self.image_dir / f"week_stat_{week_key_now(self.timezone)}.png"
-            figure.savefig(path, bbox_inches="tight")
-            plt.close(figure)
+            path = self.image_dir / f"week_stat_{snapshot.week_key}_{uuid.uuid4().hex}.png"
+            partial = path.with_suffix(".part")
+            try:
+                figure.savefig(partial, format="png", facecolor=figure.get_facecolor())
+                os.replace(partial, path)
+            finally:
+                partial.unlink(missing_ok=True)
+                figure.clear()
             return path
-        except Exception as exc:  # noqa: BLE001
-            self.logger.warning("生成饼图失败: %s", exc)
-            return None
-
-    @staticmethod
-    def _pick_cjk_font(matplotlib_module: Any) -> str | None:
-        try:
-            from matplotlib import font_manager
-
-            available = {font.name for font in font_manager.fontManager.ttflist}
-        except Exception:  # noqa: BLE001
-            return None
-        for candidate in _CJK_FONT_CANDIDATES:
-            if candidate in available:
-                return candidate
-        return None

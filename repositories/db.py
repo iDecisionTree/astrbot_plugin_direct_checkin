@@ -9,10 +9,15 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from collections.abc import Callable
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, TypeVar
 
 T = TypeVar("T")
+_command_connection: ContextVar[sqlite3.Connection | None] = ContextVar(
+    "command_connection", default=None
+)
+SCHEMA_VERSION = 2
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -140,9 +145,9 @@ class Database:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, *, command: bool = False) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.path), timeout=30.0)
+        conn = sqlite3.connect(str(self.path), timeout=30.0, check_same_thread=not command)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA journal_mode=WAL")
@@ -152,10 +157,49 @@ class Database:
     def _create_schema(self) -> None:
         conn = self._connect()
         try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA_VERSION:
+                raise RuntimeError("数据库版本高于插件版本，请勿降级运行")
+            existing = conn.execute("SELECT 1 FROM sqlite_master WHERE name='users'").fetchone()
+            if existing and version < SCHEMA_VERSION:
+                backup = self.path.with_suffix(f".before-v{SCHEMA_VERSION}.db")
+                if not backup.exists():
+                    temporary = backup.with_suffix(".db.part")
+                    target = sqlite3.connect(temporary)
+                    try:
+                        conn.backup(target)
+                    finally:
+                        target.close()
+                    temporary.replace(backup)
+            conn.execute("BEGIN IMMEDIATE")
             for statement in SCHEMA_STATEMENTS:
-                conn.execute(statement)
-            self._migrate(conn)
+                if "CREATE TABLE" in statement:
+                    conn.execute(statement)
+            if version < SCHEMA_VERSION:
+                self._migrate(conn)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS week_policies (week_key TEXT PRIMARY KEY, weekly_limit INTEGER NOT NULL CHECK(weekly_limit > 0))"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS command_receipts (event_key TEXT PRIMARY KEY, response TEXT, created_at TEXT NOT NULL)"
+            )
+            conn.execute("CREATE TABLE IF NOT EXISTS reset_commits (operation_id TEXT PRIMARY KEY)")
+            if version < SCHEMA_VERSION:
+                conn.execute(
+                    "INSERT OR IGNORE INTO week_policies SELECT week_key, 2 FROM submissions UNION SELECT week_key, 2 FROM count_adjustments"
+                )
+            for statement in SCHEMA_STATEMENTS:
+                if "CREATE TABLE" not in statement and "idx_submissions_message" not in statement:
+                    conn.execute(statement)
+            conn.execute("DROP INDEX IF EXISTS idx_submissions_message")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_submission_event ON submissions(event_key) WHERE event_key IS NOT NULL"
+            )
+            conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -163,7 +207,11 @@ class Database:
     def _migrate(conn: sqlite3.Connection) -> None:
         """为旧库补齐新增列，并回填北京时间日期。"""
 
+        old_adjustments = {
+            row["name"] for row in conn.execute("PRAGMA table_info(count_adjustments)")
+        }
         additions = (
+            ("submissions", "event_key", "TEXT"),
             ("submissions", "beijing_date", "TEXT"),
             ("count_adjustments", "beijing_date", "TEXT"),
             ("count_adjustments", "counted", "INTEGER NOT NULL DEFAULT 0"),
@@ -192,12 +240,33 @@ class Database:
                     f"UPDATE {table} SET beijing_date = ? WHERE id = ?",
                     (to_beijing(moment).strftime("%Y-%m-%d"), row["id"]),
                 )
+        if "counted" not in old_adjustments:
+            events = conn.execute("""SELECT user_id, week_key, submitted_at AS ts, id, 1 AS delta, 'auto' AS kind
+                FROM submissions WHERE status='VALID_COUNTED'
+                UNION ALL SELECT user_id, week_key, created_at, id, delta, 'manual' FROM count_adjustments
+                ORDER BY ts, kind, id""").fetchall()
+            counts: dict[tuple, int] = {}
+            sequences: dict[tuple, int] = {}
+            for row in events:
+                key = (row["user_id"], row["week_key"])
+                current = counts.get(key, 0)
+                counted = row["kind"] == "auto" or (row["delta"] > 0 and current < 2)
+                if counted:
+                    sequences[key] = sequences.get(key, 0) + 1
+                counts[key] = max(0, current + (1 if counted else min(0, row["delta"])))
+                if row["kind"] == "manual":
+                    conn.execute(
+                        "UPDATE count_adjustments SET counted=?, counted_slot=? WHERE id=?",
+                        (int(counted), sequences.get(key) if counted else None, row["id"]),
+                    )
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self._create_schema)
 
     async def fetch(self, fn: Callable[[sqlite3.Connection], T]) -> T:
         """只读操作。"""
+        if (conn := _command_connection.get()) is not None:
+            return fn(conn)
 
         def work() -> T:
             conn = self._connect()
@@ -210,6 +279,8 @@ class Database:
 
     async def run(self, fn: Callable[[sqlite3.Connection], T]) -> T:
         """单次写操作，自动提交。"""
+        if (conn := _command_connection.get()) is not None:
+            return fn(conn)
 
         def work() -> T:
             conn = self._connect()
@@ -225,7 +296,7 @@ class Database:
 
         return await asyncio.to_thread(work)
 
-    async def reset_checkin_data(self) -> dict[str, int]:
+    async def reset_checkin_data(self, operation_id: str | None = None) -> dict[str, int]:
         """清空全部打卡相关数据，但保留管理员表与 NAS 文件。
 
         按外键依赖顺序删除；同时重置自增序列。
@@ -238,9 +309,12 @@ class Database:
             "pause_periods",
             "audit_log",
             "users",
+            "week_policies",
         )
 
         def work(conn: sqlite3.Connection) -> dict[str, int]:
+            if operation_id:
+                conn.execute("INSERT INTO reset_commits VALUES (?)", (operation_id,))
             result: dict[str, int] = {}
             for table in tables:
                 cursor = conn.execute(f"DELETE FROM {table}")  # noqa: S608 - 表名为固定白名单
@@ -264,6 +338,8 @@ class Database:
         immediate: bool = True,
     ) -> T:
         """显式事务。immediate=True 时使用 BEGIN IMMEDIATE 防止写竞争。"""
+        if (conn := _command_connection.get()) is not None:
+            return fn(conn)
 
         def work() -> T:
             conn = self._connect()
@@ -279,6 +355,57 @@ class Database:
                 conn.close()
 
         return await asyncio.to_thread(work)
+
+    async def weekly_target(self, week_key: str, configured: int) -> int:
+        def work(conn):
+            conn.execute(
+                "INSERT OR IGNORE INTO week_policies VALUES (?, ?)", (week_key, max(1, configured))
+            )
+            return conn.execute(
+                "SELECT weekly_limit FROM week_policies WHERE week_key=?", (week_key,)
+            ).fetchone()[0]
+
+        return await self.transaction(work)
+
+    async def execute_command(self, key: str, now: str, callback) -> str:
+        """短管理员操作与回复回执在同一事务提交；不得在 callback 中调用模型或下载。"""
+
+        def begin():
+            connection = self._connect(command=True)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                return connection
+            except BaseException:
+                connection.close()
+                raise
+
+        # 等待其他写事务释放 SQLite 锁时不占用事件循环。连接移交后仅由本协程使用。
+        opening = asyncio.create_task(asyncio.to_thread(begin))
+        try:
+            conn = await asyncio.shield(opening)
+        except asyncio.CancelledError:
+            connection = await opening
+            connection.close()
+            raise
+        token = None
+        try:
+            row = conn.execute(
+                "SELECT response FROM command_receipts WHERE event_key=?", (key,)
+            ).fetchone()
+            if row:
+                return row["response"] or "词九已经接收过这条消息，请使用新消息重试。"
+            token = _command_connection.set(conn)
+            response = await callback()
+            conn.execute("INSERT INTO command_receipts VALUES (?, ?, ?)", (key, response, now))
+            conn.commit()
+            return response
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            if token is not None:
+                _command_connection.reset(token)
+            conn.close()
 
 
 def row_to_dict(row: Any) -> dict[str, Any]:

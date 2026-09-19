@@ -3,13 +3,13 @@
     "description": "初始/恢复管理员 QQ",
     "type": "string",
     "default": "2747344390",
-    "hint": "管理员权限按 QQ 号验证（学号不参与鉴权）。该 QQ 为超级管理员，/d admin remove 不能移除。首次创建数据库时写入；若管理员表为空，也会用该值做一次恢复性初始化。"
+    "hint": "按 QQ 鉴权。每次启动确保该 QQ 在管理员表中，命令不能移除；重置保留管理员。"
   },
   "nas_base_dir": {
     "description": "打卡文件根目录",
     "type": "string",
     "default": "/mnt/nas/direct_checkin",
-    "hint": "插件只会操作该目录内的内容，必须存在且可写，否则拒绝打卡。"
+    "hint": "Linux/Docker 中已挂载且可写的专用目录；重置会清空目录内全部内容（含非插件文件）。不得指向系统根目录、数据库所在目录或其祖先；不支持根目录符号链接和内部嵌套挂载点。"
   },
   "timezone": {
     "description": "统计时区",
@@ -17,14 +17,16 @@
     "default": "Asia/Shanghai"
   },
   "weekly_limit": {
-    "description": "每周自动计分上限",
+    "description": "每周有效计次目标",
     "type": "int",
-    "default": 2
+    "default": 2,
+    "hint": "1–100，默认 2。自动与人工计次共享额度；本周首次确定后冻结，修改配置从下一周生效。旧库历史周统一补为 2。"
   },
   "max_file_size_mb": {
     "description": "Word 文件大小上限（MiB）",
     "type": "int",
-    "default": 20
+    "default": 20,
+    "hint": "1–100 MiB，默认 20；解压总量另有上限。"
   },
   "student_id_regex": {
     "description": "学号校验正则",
@@ -34,52 +36,62 @@
   "name_max_length": {
     "description": "姓名最大长度",
     "type": "int",
-    "default": 30
+    "default": 30,
+    "hint": "1–100，默认 30。"
   },
   "reason_max_length": {
     "description": "暂停原因最大长度",
     "type": "int",
-    "default": 100
+    "default": 100,
+    "hint": "1–1000，默认 100；超长暂停原因拒绝执行。"
   },
   "similarity_warn_threshold": {
     "description": "进入历史对比的相似度阈值",
     "type": "float",
-    "default": 0.85
+    "default": 0.85,
+    "hint": "0–1 且不得大于高相似阈值；附本人历史差异供 AI 判断。"
   },
   "similarity_high_threshold": {
     "description": "判定为高重复风险的相似度阈值",
     "type": "float",
-    "default": 0.97
+    "default": 0.97,
+    "hint": "0–1。高相似进入 AI 复核，不直接拒绝；文件或规范化正文完全相同仍拦截。"
   },
   "similarity_max_chars": {
     "description": "参与相似度计算的文本上限",
     "type": "int",
-    "default": 20000
+    "default": 20000,
+    "hint": "1000–100000，默认 20000。"
   },
   "history_compare_weeks": {
     "description": "查重历史范围（周）",
     "type": "int",
-    "default": 8
+    "default": 8,
+    "hint": "1–520，默认 8；最多比较最近 20 份有效或终态材料。完全重复查询不限于此范围。"
   },
   "ai_timeout_seconds": {
     "description": "AI 审查超时时间（秒）",
     "type": "int",
-    "default": 60
+    "default": 60,
+    "hint": "5–300 秒，默认 60。"
   },
   "ai_retry_count": {
     "description": "AI 非法 JSON/临时失败重试次数",
     "type": "int",
-    "default": 1
+    "default": 1,
+    "hint": "0–3，默认 1；总尝试次数为该值 + 1。"
   },
   "ai_max_input_chars": {
     "description": "AI 文本输入上限",
     "type": "int",
-    "default": 24000
+    "default": 24000,
+    "hint": "1000–100000，默认 24000；长文保留首尾和关键段落，历史差异单独附加。"
   },
   "export_keep_minutes": {
     "description": "临时导出文件保留时间（分钟）",
     "type": "int",
-    "default": 10
+    "default": 10,
+    "hint": "1–1440，默认 10；临时 PNG/XLSX 在启动和退出时也会清理。"
   },
   "enable_cross_user_exact_check": {
     "description": "跨用户完全重复风险检测",
@@ -90,6 +102,8 @@
     "description": "词九人格强度（v1 固定为 strong）",
     "type": "string",
     "default": "strong",
-    "options": ["strong"]
+    "options": [
+      "strong"
+    ]
   }
 }

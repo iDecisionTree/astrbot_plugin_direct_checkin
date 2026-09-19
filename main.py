@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from weakref import WeakValueDictionary
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -27,22 +28,27 @@ from .services.command_router import CommandName, ParsedCommand, parse_command
 from .services.duplicate_service import DuplicateService
 from .services.export_service import ExportService
 from .services.file_service import FileService
+from .services.operation_gate import MaintenanceError, OperationGate
 from .services.stat_service import StatService
 from .utils import config as cfg
 from .utils import response_templates as T
-from .utils.time_utils import now_utc, utc_iso
+from .utils.request_context import event_identity, event_key, received_at
+from .utils.time_utils import now_utc, utc_iso, week_key_of
 
 PLUGIN_NAME = "astrbot_plugin_direct_checkin"
 PLUGIN_AUTHOR = "iDecisionTree"
 PLUGIN_DESC = "直属队 Word 学习打卡、查重与 AI 审查"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
 
 
 @register(PLUGIN_NAME, PLUGIN_AUTHOR, PLUGIN_DESC, PLUGIN_VERSION)
 class DirectCheckinPlugin(Star):
     def __init__(self, context: Context, config=None) -> None:
         super().__init__(context, config)
-        self.config = config or {}
+        self.config = cfg.validate(config or {}, logger)
+        self._gate = OperationGate()
+        self._command_lock = asyncio.Lock()
+        self._event_locks = WeakValueDictionary()
         # Star.__init__ 已注入插件专用 logger；仅在缺失时回退到全局 logger。
         self.logger = getattr(self, "logger", logger)
         self._cleanup_tasks: set[asyncio.Task] = set()
@@ -125,6 +131,7 @@ class DirectCheckinPlugin(Star):
             weekly_limit=self.weekly_limit,
             timezone=self.timezone,
             super_admin_qq=cfg.get_str(self.config, "bootstrap_admin_qq", "").strip(),
+            reason_max_length=cfg.get_int(self.config, "reason_max_length", 100),
         )
         self.export_service = ExportService(
             user_repo=self.user_repo,
@@ -162,7 +169,24 @@ class DirectCheckinPlugin(Star):
         self.export_dir.mkdir(parents=True, exist_ok=True)
         self.image_dir.mkdir(parents=True, exist_ok=True)
         await self._bootstrap_admin()
-        await self._recover_pending()
+        try:
+            await self.admin_service.reset_service.recover()
+        except Exception:
+            self.logger.exception("恢复重置失败，进入维护状态")
+            self._gate.blocked = True
+        await self.db.weekly_target(week_key_of(now_utc(), self.timezone), self.weekly_limit)
+        await self.db.run(
+            lambda conn: conn.execute(
+                "UPDATE command_receipts SET response=? WHERE response IS NULL",
+                ("上次处理被中断，词九保留了处理记录。请使用一条新消息重试，或请管理员核对结果。",),
+            )
+        )
+        for folder in (self.export_dir, self.image_dir):
+            for path in folder.iterdir():
+                if path.is_file() and path.suffix in {".png", ".xlsx", ".part"}:
+                    path.unlink(missing_ok=True)
+        if not self._gate.blocked:
+            await self._recover_pending()
         if not self.file_service.check_ready():
             self.logger.error(
                 "NAS 归档目录不可用：%s（严格模式下将拒绝打卡，请检查挂载）",
@@ -207,14 +231,101 @@ class DirectCheckinPlugin(Star):
     @filter.command("d")
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     async def direct_checkin(self, event: AstrMessageEvent):
+        stamp = received_at.set(now_utc())
+        identity = event_identity.set(event_key(event))
+        exclusive = False
         try:
-            async for result in self._dispatch(event):
+            command = parse_command(event.message_str or "")
+            mutating = command.name in {
+                CommandName.BIND,
+                CommandName.CHECKIN,
+                CommandName.ADD,
+                CommandName.REMOVE,
+                CommandName.SKIP,
+                CommandName.RESUME,
+                CommandName.RESET,
+            } or (command.name == CommandName.ADMIN and command.args[0] != "help")
+            if mutating and event_identity.get() is None:
+                yield event.plain_result(
+                    "词九无法确认这条消息的唯一标识，本次未执行。请检查适配器后重新发送。"
+                )
+                return
+            exclusive = command.name == CommandName.RESET
+            async with self._gate.enter(exclusive):
+                if not mutating:
+                    results = [result async for result in self._dispatch(event)]
+                else:
+                    key = event_identity.get()
+                    lock = self._event_locks.setdefault(key, asyncio.Lock())
+                    async with lock:
+
+                        async def execute():
+                            items = [result async for result in self._dispatch(event)]
+                            return "\n".join(
+                                "".join(getattr(c, "text", "") for c in item.chain)
+                                for item in items
+                            )
+
+                        if command.name not in {CommandName.CHECKIN, CommandName.RESET}:
+                            async with self._command_lock:
+                                response = await self.db.execute_command(
+                                    key, utc_iso(received_at.get()), execute
+                                )
+                        else:
+
+                            def claim(conn):
+                                row = conn.execute(
+                                    "SELECT response FROM command_receipts WHERE event_key=?",
+                                    (key,),
+                                ).fetchone()
+                                if row is not None:
+                                    return False, row["response"]
+                                conn.execute(
+                                    "INSERT INTO command_receipts VALUES (?,NULL,?)",
+                                    (key, utc_iso(received_at.get())),
+                                )
+                                return True, None
+
+                            fresh, response = await self.db.transaction(claim)
+                            if fresh:
+                                # 重置不可在文件工作线程仍运行时释放维护屏障。
+                                task = asyncio.create_task(execute())
+                                try:
+                                    response = await asyncio.shield(task)
+                                except asyncio.CancelledError:
+                                    response = await task
+                                    await self.db.run(
+                                        lambda conn: conn.execute(
+                                            "UPDATE command_receipts SET response=? WHERE event_key=?",
+                                            (response, key),
+                                        )
+                                    )
+                                    raise
+                                except Exception:
+                                    response = T.processing_error()
+                                    self.logger.exception("事件执行失败")
+                                await self.db.run(
+                                    lambda conn: conn.execute(
+                                        "UPDATE command_receipts SET response=? WHERE event_key=?",
+                                        (response, key),
+                                    )
+                                )
+                            response = response or "这条消息词九已接收，请稍后使用新消息重试。"
+                        results = [event.plain_result(response)]
+                if exclusive:
+                    self._gate.blocked = self.admin_service.reset_service.journal.exists()
+            for result in results:
                 yield result
+        except MaintenanceError:
+            yield event.plain_result("词九正在维护打卡数据，请稍后重试。")
         except Exception:
             self.logger.exception("处理 /d 命令异常")
             yield event.plain_result(T.processing_error())
         finally:
-            # 命令已给出明确回复，阻止事件继续传播到通用 LLM 对话。
+            if exclusive:
+                self._gate.blocked = self.admin_service.reset_service.journal.exists()
+            received_at.reset(stamp)
+            event_identity.reset(identity)
             event.stop_event()
 
     async def _dispatch(self, event: AstrMessageEvent):
@@ -222,7 +333,14 @@ class DirectCheckinPlugin(Star):
         qq = str(event.get_sender_id())
 
         if command.name == CommandName.HELP:
-            yield event.plain_result(T.normal_help())
+            yield event.plain_result(
+                T.normal_help(
+                    await self.db.weekly_target(
+                        week_key_of(received_at.get() or now_utc(), self.timezone),
+                        self.weekly_limit,
+                    )
+                )
+            )
             return
 
         if command.name == CommandName.BIND:
@@ -241,7 +359,7 @@ class DirectCheckinPlugin(Star):
             yield event.plain_result(T.no_permission())
             return
 
-        message_id = str(getattr(event.message_obj, "message_id", "") or "")
+        message_id = event_identity.get() or str(getattr(event.message_obj, "message_id", "") or "")
 
         if command.name == CommandName.ADMIN:
             sub = command.args[0] if command.args else "help"
@@ -301,7 +419,9 @@ class DirectCheckinPlugin(Star):
         student_id = command.args[0] if command.args else ""
         name = command.args[1] if len(command.args) > 1 else ""
         group_id = str(event.get_group_id()) if event.get_group_id() else None
-        result = await self.binding_service.bind(qq, student_id, name, group_id, utc_iso(now_utc()))
+        result = await self.binding_service.bind(
+            qq, student_id, name, group_id, utc_iso(received_at.get() or now_utc())
+        )
         if result.status == BindStatus.OK:
             return T.bind_success(name)
         if result.status in {BindStatus.ALREADY_SAME, BindStatus.ALREADY_OTHER}:
@@ -334,7 +454,7 @@ class DirectCheckinPlugin(Star):
             user, conflict = await self.user_repo.resolve_identifier(target_value)
             if conflict:
                 yield event.plain_result(
-                    T.admin_op_failed("这个数字同时匹配到不同用户，请改用学号")
+                    T.admin_op_failed("这个数字同时匹配到不同用户，请使用 sid:学号 或 qq:QQ号")
                 )
                 return
             if user is None:
@@ -353,7 +473,7 @@ class DirectCheckinPlugin(Star):
             yield event.plain_result(T.export_empty())
             return
 
-        await self.audit_repo.write(
+        await self._audit_output(
             actor_qq=qq,
             actor_role="admin",
             action="export",
@@ -380,7 +500,7 @@ class DirectCheckinPlugin(Star):
             self.logger.exception("统计失败")
             yield event.plain_result(T.stat_failed())
             return
-        await self.audit_repo.write(
+        await self._audit_output(
             actor_qq=str(event.get_sender_id()),
             actor_role="admin",
             action="stat",
@@ -395,6 +515,12 @@ class DirectCheckinPlugin(Star):
             self._schedule_cleanup(bundle.image_path, 5)
 
     # ------------------------------------------------------------------ 清理
+    async def _audit_output(self, **fields):
+        try:
+            await self.audit_repo.write(**fields)
+        except Exception:
+            self.logger.exception("记录报表审计失败，仍返回已生成的结果")
+
     def _schedule_cleanup(self, path: Path, minutes: int) -> None:
         async def cleaner() -> None:
             await asyncio.sleep(max(1, minutes) * 60)
@@ -410,4 +536,9 @@ class DirectCheckinPlugin(Star):
     async def terminate(self) -> None:
         for task in list(self._cleanup_tasks):
             task.cancel()
+        await asyncio.gather(*self._cleanup_tasks, return_exceptions=True)
         self._cleanup_tasks.clear()
+        for folder in (self.export_dir, self.image_dir):
+            for path in folder.glob("*"):
+                if path.is_file() and path.suffix in {".png", ".xlsx", ".part"}:
+                    path.unlink(missing_ok=True)

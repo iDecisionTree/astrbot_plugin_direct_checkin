@@ -72,18 +72,28 @@ def parse_command(raw_text: str) -> ParsedCommand:
     rest = tokens[1:]
 
     if head == "help":
+        if rest:
+            return ParsedCommand(CommandName.UNKNOWN)
         return ParsedCommand(CommandName.HELP)
 
     if head == "admin":
         sub = rest[0].lower() if rest else "help"
         if sub not in _ADMIN_SUBCOMMANDS:
             return ParsedCommand(CommandName.UNKNOWN)
+        if (sub == "help" and len(rest) > 1) or (
+            sub != "help" and (len(rest) != 2 or not _DIGITS.fullmatch(rest[1]))
+        ):
+            return ParsedCommand(CommandName.UNKNOWN)
         return ParsedCommand(CommandName.ADMIN, args=[sub, *rest[1:]])
 
     if head == "add":
+        if len(rest) != 1 or not re.fullmatch(r"(?:sid:|qq:)?\d+", rest[0], re.I):
+            return ParsedCommand(CommandName.UNKNOWN)
         return ParsedCommand(CommandName.ADD, args=rest)
 
     if head == "remove":
+        if len(rest) != 1 or not re.fullmatch(r"(?:sid:|qq:)?\d+", rest[0], re.I):
+            return ParsedCommand(CommandName.UNKNOWN)
         return ParsedCommand(CommandName.REMOVE, args=rest)
 
     if head == "skip":
@@ -93,15 +103,23 @@ def parse_command(raw_text: str) -> ParsedCommand:
         return ParsedCommand(CommandName.SKIP, args=[rest[0].lower()], reason=reason)
 
     if head == "resume":
+        if rest:
+            return ParsedCommand(CommandName.UNKNOWN)
         return ParsedCommand(CommandName.RESUME)
 
     if head == "get":
+        if len(rest) > 1 or (rest and not re.fullmatch(r"(?:sid:|qq:)?\d+", rest[0], re.I)):
+            return ParsedCommand(CommandName.UNKNOWN)
         return ParsedCommand(CommandName.GET, args=rest)
 
     if head == "stat":
+        if rest:
+            return ParsedCommand(CommandName.UNKNOWN)
         return ParsedCommand(CommandName.STAT)
 
     if head == "reset":
+        if rest and (len(rest) != 1 or rest[0].lower() != "confirm"):
+            return ParsedCommand(CommandName.UNKNOWN)
         confirm = bool(rest) and rest[0].lower() == "confirm"
         return ParsedCommand(CommandName.RESET, args=["confirm"] if confirm else [])
 

@@ -1,5 +1,5 @@
 import asyncio
-import re
+from datetime import datetime
 from pathlib import Path
 
 from astrbot_plugin_direct_checkin.models.enums import SubmissionStatus
@@ -70,31 +70,24 @@ def test_export_workbook_structure(tmp_path: Path):
         assert bundle.path is not None and bundle.path.exists()
 
         workbook = load_workbook(bundle.path)
-        assert workbook.sheetnames == ["用户汇总", "打卡明细", "人工调整", "暂停记录"]
-
+        assert workbook.sheetnames == ["本周总览", "用户汇总", "打卡明细", "人工调整", "暂停记录"]
         summary = workbook["用户汇总"]
-        assert summary["A1"].value == "QQ号"
-        # QQ号/学号/姓名
-        assert summary["A2"].value == "1001"
-        assert summary["B2"].value == "2026123456"
-        # 绑定时间必须是北京时间字符串，而不是时区名。
-        assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", str(summary["E2"].value))
-        # 当前周自动计分次数=1，人工调整=1，有效计次=2，是否完成=是
-        assert summary["F2"].value == 1
-        assert summary["G2"].value == 1
-        assert summary["H2"].value == 2
-        assert summary["J2"].value == "是"
-        # 累计有效计分次数 = 1 次通过提交 + 1 次人工 = 2。
-        assert summary["N1"].value == "累计有效计分次数"
-        assert summary["N2"].value == 2
-        # 累计完成周数：本周有效计次 2，计 1 周。
-        assert summary["O1"].value == "累计完成周数"
-        assert summary["O2"].value == 1
-
-        detail = workbook["打卡明细"]
-        assert detail.max_row == 2
-        assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", str(detail["E2"].value))
-        adjust = workbook["人工调整"]
-        assert adjust.max_row == 2
+        data = dict(zip([c.value for c in summary[1]], [c.value for c in summary[2]], strict=True))
+        assert data["QQ号"] == "1001" and data["学号"] == "2026123456"
+        assert isinstance(data["绑定时间"], datetime)
+        assert data["绑定时间"].hour == 10
+        assert data["本周自动计次"] == 1
+        assert data["本周人工计次"] == 1
+        assert data["本周有效计次"] == 2
+        assert data["本周状态"] == "已完成"
+        assert data["有效材料数"] == 1
+        assert data["累计周有效计次"] == 2
+        assert data["完成周数"] == 1
+        assert workbook["本周总览"]["B5"].value == 1
+        assert workbook["本周总览"]["F5"].value == 1
+        assert workbook["本周总览"]._charts
+        assert workbook["打卡明细"].max_row == 2
+        assert workbook["人工调整"].max_row == 2
+        workbook.close()
 
     asyncio.run(scenario())

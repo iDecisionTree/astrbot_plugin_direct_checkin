@@ -6,7 +6,7 @@ import sqlite3
 from typing import Any
 
 from ..models.entities import Submission
-from ..models.enums import SubmissionStatus
+from ..models.enums import ErrorCode, SubmissionStatus
 from .db import Database
 
 _UPDATABLE_COLUMNS = frozenset(
@@ -86,6 +86,16 @@ def _has_counted_on_date(conn: sqlite3.Connection, user_id: int, beijing_date: s
     return _count_counted_submissions_on_date(conn, user_id, beijing_date) > 0
 
 
+def next_sequence(conn: sqlite3.Connection, user_id: int, week_key: str) -> int:
+    row = conn.execute(
+        """SELECT MAX(counted_slot) AS seq FROM (
+        SELECT counted_slot FROM submissions WHERE user_id=? AND week_key=?
+        UNION ALL SELECT counted_slot FROM count_adjustments WHERE user_id=? AND week_key=?)""",
+        (user_id, week_key, user_id, week_key),
+    ).fetchone()
+    return int(row["seq"] or 0) + 1
+
+
 def _build_update(conn: sqlite3.Connection, submission_id: str, fields: dict[str, Any]) -> None:
     if not fields:
         return
@@ -119,6 +129,7 @@ class SubmissionRepository:
         file_size: int,
         sha256: str,
         now: str,
+        event_key: str | None = None,
     ) -> Submission:
         def work(conn: sqlite3.Connection) -> Submission:
             conn.execute(
@@ -154,6 +165,10 @@ class SubmissionRepository:
             row = conn.execute(
                 "SELECT * FROM submissions WHERE id = ?", (submission_id,)
             ).fetchone()
+            if event_key:
+                conn.execute(
+                    "UPDATE submissions SET event_key=? WHERE id=?", (event_key, submission_id)
+                )
             return Submission.from_row(row)
 
         return await self.db.run(work)
@@ -176,11 +191,41 @@ class SubmissionRepository:
 
         return await self.db.fetch(work)
 
+    async def get_by_event(
+        self, event_key: str, message_id: str, user_id: int, group_id: str | None
+    ) -> Submission | None:
+        def work(conn):
+            row = conn.execute(
+                """SELECT * FROM submissions WHERE event_key=? OR
+                (event_key IS NULL AND qq_message_id=? AND user_id=? AND COALESCE(qq_group_id,'')=?)
+                ORDER BY submitted_at DESC LIMIT 1""",
+                (event_key, message_id, user_id, group_id or ""),
+            ).fetchone()
+            return Submission.from_row(row)
+
+        return await self.db.fetch(work)
+
     async def update(self, submission_id: str, **fields: Any) -> None:
         def work(conn: sqlite3.Connection) -> None:
             _build_update(conn, submission_id, fields)
 
         await self.db.run(work)
+
+    async def fail_pending(self, submission_id: str, now: str) -> str | None:
+        """只将未定稿记录标为技术失败，不覆盖已提交的计次。"""
+
+        def work(conn):
+            conn.execute(
+                "UPDATE submissions SET status='PROCESSING_ERROR', error_code=?, "
+                "error_message='处理异常', updated_at=? WHERE id=? AND status='PENDING'",
+                (ErrorCode.DB_ERROR, now, submission_id),
+            )
+            row = conn.execute(
+                "SELECT status FROM submissions WHERE id=?", (submission_id,)
+            ).fetchone()
+            return row[0] if row else None
+
+        return await self.db.transaction(work)
 
     async def finalize_counted(
         self,
@@ -196,13 +241,19 @@ class SubmissionRepository:
         计次规则（自动打卡）：
         - 与人工 +1 共享每周 ``weekly_limit`` 个计分槽；
         - 同一北京自然日最多计一次，当天第二次及以上有效打卡记为额外；
-        - 人工 -1 会减少本周可用槽位。
+        - 人工 -1 降低当前净次数，释放本周额度，但不复用历史序号。
 
         返回 (status, counted_slot, 本周有效计次, reason)，
         reason 取值：``counted`` / ``same_day`` / ``week_full``。
         """
 
         def work(conn: sqlite3.Connection) -> tuple[str, int | None, int, str]:
+            existing = conn.execute(
+                "SELECT status FROM submissions WHERE id=? AND user_id=? AND week_key=?",
+                (submission_id, user_id, week_key),
+            ).fetchone()
+            if existing is None or existing["status"] != SubmissionStatus.PENDING.value:
+                raise ValueError("只能定稿存在且仍待处理的提交")
             auto_counted = _count_counted_submissions(conn, user_id, week_key)
             manual_counted = _count_counted_adjustments(conn, user_id, week_key)
             manual_negatives = _count_manual_negatives(conn, user_id, week_key)
@@ -217,7 +268,7 @@ class SubmissionRepository:
                 reason = "same_day"
             elif current < weekly_limit:
                 status = SubmissionStatus.VALID_COUNTED.value
-                slot = current + 1
+                slot = next_sequence(conn, user_id, week_key)
                 counted_flag = 1
                 total = current + 1
                 reason = "counted"
@@ -237,6 +288,11 @@ class SubmissionRepository:
                 }
             )
             _build_update(conn, submission_id, payload)
+            conn.execute(
+                "UPDATE users SET last_submission_at=MAX(COALESCE(last_submission_at,''), "
+                "(SELECT submitted_at FROM submissions WHERE id=?)), updated_at=? WHERE id=?",
+                (submission_id, fields.get("updated_at", ""), user_id),
+            )
             return status, slot, total, reason
 
         # immediate=True 防止同用户并发写覆盖计分槽。

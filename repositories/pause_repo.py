@@ -53,7 +53,7 @@ class PauseRepository:
                 SELECT * FROM pause_periods
                 WHERE resumed_at IS NULL
                   AND start_at <= ?
-                  AND scheduled_end_at >= ?
+                  AND scheduled_end_at > ?
                 ORDER BY start_at DESC, id DESC
                 LIMIT 1
                 """,
@@ -71,7 +71,7 @@ class PauseRepository:
                 SET resumed_at = ?
                 WHERE resumed_at IS NULL
                   AND start_at <= ?
-                  AND scheduled_end_at >= ?
+                  AND scheduled_end_at > ?
                 """,
                 (now, now, now),
             )

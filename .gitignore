@@ -211,3 +211,4 @@ __marimo__/
 
 # 插件本地数据（仅在不使用 AstrBot data 目录时的回退位置）
 /data/
+/outputs/

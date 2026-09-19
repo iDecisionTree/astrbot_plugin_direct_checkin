@@ -12,7 +12,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..utils.text_utils import normalize_text, select_relevant_text
+from ..utils.text_utils import normalize_text_lines, select_relevant_text
 
 
 class DocxValidationError(Exception):
@@ -64,7 +64,7 @@ def validate_docx(path: Path, max_uncompressed_bytes: int) -> None:
                     raise DocxValidationError("E_FILE_TOO_LARGE", "压缩比异常，疑似 ZIP Bomb")
             if zf.testzip() is not None:
                 raise DocxValidationError("E_DOCX_PARSE_FAILED", "压缩包内容损坏")
-    except zipfile.BadZipFile as exc:
+    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, OSError, EOFError) as exc:
         raise DocxValidationError("E_DOCX_PARSE_FAILED", "压缩包无法解析") from exc
 
 
@@ -84,7 +84,25 @@ def extract_content(path: Path) -> DocxContent:
 
     segments: list[str] = []
     headings: list[str] = []
-    for paragraph in document.paragraphs:
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    for child in document.element.body.iterchildren():
+        if child.tag.endswith("}tbl"):
+            table = Table(child, document)
+            for row in table.rows:
+                seen = set()
+                cells = []
+                for cell in row.cells:
+                    if cell._tc not in seen and cell.text.strip():
+                        cells.append(cell.text.strip())
+                        seen.add(cell._tc)
+                if cells:
+                    segments.append(" | ".join(cells))
+            continue
+        if not child.tag.endswith("}p"):
+            continue
+        paragraph = Paragraph(child, document)
         text = (paragraph.text or "").strip()
         if not text:
             continue
@@ -97,13 +115,7 @@ def extract_content(path: Path) -> DocxContent:
         if style_name.lower().startswith("heading") or style_name.startswith("标题"):
             headings.append(text[:100])
 
-    for table in document.tables:
-        for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells if cell.text and cell.text.strip()]
-            if cells:
-                segments.append(" | ".join(cells))
-
-    text = normalize_text("\n".join(segments))
+    text = normalize_text_lines("\n".join(segments))
 
     image_count = 0
     link_count = 0

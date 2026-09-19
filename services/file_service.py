@@ -100,8 +100,12 @@ class FileService:
         if not self.check_ready():
             raise FileServiceError(ErrorCode.NAS_WRITE_FAILED, "归档目录不可写")
 
+        announced_size = getattr(replied.component, "size", None)
+        if isinstance(announced_size, (int, float)) and announced_size > self.max_file_size_bytes:
+            raise FileServiceError(ErrorCode.FILE_TOO_LARGE, "文件超过大小上限")
+
         try:
-            source_path = await replied.component.get_file()
+            source_path = await asyncio.wait_for(replied.component.get_file(), timeout=120)
         except Exception as exc:  # noqa: BLE001 - 适配器异常需统一转为友好错误
             self.logger.warning("下载引用文件失败: %s", exc)
             raise FileServiceError(ErrorCode.FILE_DOWNLOAD_FAILED, "文件下载失败") from exc
@@ -110,7 +114,10 @@ class FileService:
             raise FileServiceError(ErrorCode.FILE_DOWNLOAD_FAILED, "文件下载失败")
 
         source = Path(source_path)
-        size = source.stat().st_size
+        try:
+            size = source.stat().st_size
+        except OSError as exc:
+            raise FileServiceError(ErrorCode.FILE_DOWNLOAD_FAILED, "下载文件不可读取") from exc
         if size <= 0:
             raise FileServiceError(ErrorCode.FILE_DOWNLOAD_FAILED, "文件为空")
         if size > self.max_file_size_bytes:
@@ -121,11 +128,24 @@ class FileService:
         except docx_parser.DocxValidationError as exc:
             raise FileServiceError(exc.code, exc.message) from exc
 
-        sha = await asyncio.to_thread(sha256_file, source)
-
         stored_path = await self._store(
             source, user.student_id, submission_id, original_filename, now_beijing_label
         )
+        try:
+            size = stored_path.stat().st_size
+            if size > self.max_file_size_bytes:
+                raise FileServiceError(ErrorCode.FILE_TOO_LARGE, "归档文件超过大小上限")
+            await asyncio.to_thread(
+                docx_parser.validate_docx, stored_path, self.max_uncompressed_bytes
+            )
+            sha = await asyncio.to_thread(sha256_file, stored_path)
+        except Exception as exc:
+            stored_path.unlink(missing_ok=True)
+            if isinstance(exc, FileServiceError):
+                raise
+            if isinstance(exc, docx_parser.DocxValidationError):
+                raise FileServiceError(exc.code, exc.message) from exc
+            raise FileServiceError(ErrorCode.FILE_DOWNLOAD_FAILED, "归档文件不可读取") from exc
         return StoredFile(
             path=stored_path,
             size=size,
@@ -151,7 +171,12 @@ class FileService:
             suffix = Path(safe_name).suffix or ".docx"
             filename = f"{now_label}_{submission_id[:8]}_{stem}{suffix}"
             target = safe_join(target_dir, filename)
-            await asyncio.to_thread(shutil.copy2, source, target)
+            partial = target.with_suffix(target.suffix + ".part")
+            try:
+                await asyncio.to_thread(shutil.copy2, source, partial)
+                await asyncio.to_thread(os.replace, partial, target)
+            finally:
+                partial.unlink(missing_ok=True)
         except ValueError as exc:
             raise FileServiceError(ErrorCode.NAS_WRITE_FAILED, "目标路径非法") from exc
         except OSError as exc:
@@ -168,63 +193,14 @@ class FileService:
             name = "document.docx"
         return sanitize_filename(name)
 
-    async def purge_all(self) -> dict[str, int]:
-        """删除归档根目录下的全部文件与空子目录，保留根目录本身。
-
-        全程不跟随符号链接，确保不会越出 ``nas_base_dir``。
-        返回 {"files", "dirs", "errors"} 计数。
-        """
-
-        base = self.nas_base_dir
-        base_resolved = base.resolve()
-
-        def work() -> dict[str, int]:
-            stats = {"files": 0, "dirs": 0, "errors": 0}
-            if not base.is_dir():
-                return stats
-            # topdown=False：先删文件，再自底向上删空目录。
-            for root, dirs, files in os.walk(base, topdown=False, followlinks=False):
-                root_path = Path(root)
-                for name in files:
-                    target = root_path / name
-                    try:
-                        target.unlink()
-                        stats["files"] += 1
-                    except OSError:
-                        stats["errors"] += 1
-                for name in dirs:
-                    target = root_path / name
-                    # 符号链接目录：仅删除链接本身，绝不进入或删除其目标。
-                    if target.is_symlink():
-                        try:
-                            target.unlink()
-                            stats["dirs"] += 1
-                        except OSError:
-                            stats["errors"] += 1
-                        continue
-                    try:
-                        if target.resolve() != base_resolved:
-                            target.rmdir()
-                            stats["dirs"] += 1
-                    except OSError:
-                        # 目录非空（例如删除失败残留）时保留。
-                        pass
-            return stats
-
-        return await asyncio.to_thread(work)
+    async def remove_owned_archive(self, stored: StoredFile) -> None:
+        try:
+            path = safe_join(self.nas_base_dir, str(stored.path))
+            await asyncio.to_thread(path.unlink, missing_ok=True)
+        except OSError:
+            self.logger.warning("清理本请求归档失败")
 
     async def cleanup_temp(self, stored: StoredFile) -> None:
-        """清理适配器下载产生的临时文件（仅限 AstrBot 临时目录内）。"""
-
-        source = Path(stored.source_path)
-        if not source.exists():
-            return
-        try:
-            from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
-
-            temp_root = Path(get_astrbot_temp_path()).resolve()
-            resolved = source.resolve()
-            if temp_root in resolved.parents:
-                await asyncio.to_thread(resolved.unlink, True)
-        except Exception:  # noqa: BLE001 - 清理失败不影响主流程
-            pass
+        # get_file() 返回的是适配器管理的借用路径，可能被其他事件共用。
+        # 本插件仅管理自己创建的归档及 .part 文件，不删除该路径。
+        return None

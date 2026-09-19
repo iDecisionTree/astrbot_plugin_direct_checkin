@@ -62,6 +62,12 @@ class UserRepository:
         """
 
         def work(conn: sqlite3.Connection) -> tuple[User | None, bool]:
+            for prefix, column in (("sid:", "student_id"), ("qq:", "qq_id")):
+                if value.lower().startswith(prefix):
+                    row = conn.execute(
+                        f"SELECT * FROM users WHERE {column}=?", (value[len(prefix) :],)
+                    ).fetchone()
+                    return User.from_row(row), False
             by_student = conn.execute(
                 "SELECT * FROM users WHERE student_id = ?", (value,)
             ).fetchone()

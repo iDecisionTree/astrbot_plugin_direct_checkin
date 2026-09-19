@@ -1,6 +1,6 @@
 """计次规则工具。
 
-统一定义"每周有效计次"与"累计有效计分次数"口径，供打卡、人工调整、导出、统计共用。
+定义每周封顶的有效净次数；累计值由报表按各周目标分别计算后相加。
 """
 
 from __future__ import annotations
@@ -20,10 +20,3 @@ def week_counted(
     if raw > weekly_limit:
         raw = weekly_limit
     return raw
-
-
-def cumulative_valid(passed_submissions: int, manual_net: int) -> int:
-    """累计有效计分次数 = 所有通过的提交 + 全部人工调整净和，最小为 0。"""
-
-    total = passed_submissions + manual_net
-    return total if total > 0 else 0

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from weakref import WeakValueDictionary
 
 from ..models.entities import Submission, User
 from ..models.enums import (
@@ -27,6 +28,7 @@ from ..repositories.pause_repo import PauseRepository
 from ..repositories.submission_repo import SubmissionRepository
 from ..repositories.user_repo import UserRepository
 from ..utils import response_templates as T
+from ..utils.request_context import event_identity, received_at
 from ..utils.time_utils import now_utc, parse_iso, to_beijing, utc_iso, week_key_of
 from .ai_review_service import AIReviewOutcome, AIReviewService
 from .docx_parser import DocxParseError, evidence_text, extract_content, text_for_ai
@@ -80,7 +82,7 @@ class CheckinService:
         self.ai_max_input_chars = ai_max_input_chars
         self.history_compare_weeks = history_compare_weeks
         self.logger = logger
-        self._locks: dict[int, asyncio.Lock] = {}
+        self._locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
     def _lock_for(self, user_id: int) -> asyncio.Lock:
         lock = self._locks.get(user_id)
@@ -90,7 +92,7 @@ class CheckinService:
         return lock
 
     async def handle(self, event: Any, user: User) -> CheckinResult:
-        now = now_utc()
+        now = received_at.get() or now_utc()
         now_iso = utc_iso(now)
         week_key = week_key_of(now, self.timezone)
 
@@ -103,14 +105,24 @@ class CheckinService:
 
         message_id = str(getattr(event.message_obj, "message_id", "") or "")
         if message_id:
-            existing = await self.submission_repo.get_by_message_id(message_id)
+            existing = await self.submission_repo.get_by_event(
+                event_identity.get() or "",
+                message_id,
+                user.id,
+                str(event.get_group_id() or "") or None,
+            )
             if existing is not None:
                 return CheckinResult(CheckinOutcome.ALREADY_PROCESSED, T.already_processed())
 
         lock = self._lock_for(user.id)
         async with lock:
             if message_id:
-                existing = await self.submission_repo.get_by_message_id(message_id)
+                existing = await self.submission_repo.get_by_event(
+                    event_identity.get() or "",
+                    message_id,
+                    user.id,
+                    str(event.get_group_id() or "") or None,
+                )
                 if existing is not None:
                     return CheckinResult(CheckinOutcome.ALREADY_PROCESSED, T.already_processed())
             return await self._process(event, user, now_iso, week_key)
@@ -122,7 +134,7 @@ class CheckinService:
             return CheckinResult(CheckinOutcome.FILE_ERROR, T.no_reply_file())
 
         submission_id = uuid.uuid4().hex
-        beijing = to_beijing(now_utc(), self.timezone)
+        beijing = to_beijing(parse_iso(now_iso), self.timezone)
         label = beijing.strftime("%Y-%m-%d_%H-%M-%S")
         beijing_date = beijing.strftime("%Y-%m-%d")
 
@@ -150,9 +162,11 @@ class CheckinService:
                 file_size=stored.size,
                 sha256=stored.sha256,
                 now=now_iso,
+                event_key=event_identity.get(),
             )
         except Exception:
             self.logger.exception("创建 PENDING 提交记录失败")
+            await self.file_service.remove_owned_archive(stored)
             await self.file_service.cleanup_temp(stored)
             return CheckinResult(CheckinOutcome.FILE_ERROR, T.processing_error())
 
@@ -163,13 +177,19 @@ class CheckinService:
         except Exception:
             self.logger.exception("打卡处理异常 submission=%s", submission_id)
             try:
-                await self.submission_repo.update(
-                    submission_id,
-                    status=SubmissionStatus.PROCESSING_ERROR.value,
-                    error_code=ErrorCode.DB_ERROR,
-                    error_message="处理异常",
-                    updated_at=now_iso,
-                )
+                status = await self.submission_repo.fail_pending(submission_id, now_iso)
+                if status in {
+                    SubmissionStatus.VALID_COUNTED.value,
+                    SubmissionStatus.VALID_EXTRA.value,
+                }:
+                    counted = status == SubmissionStatus.VALID_COUNTED.value
+                    return CheckinResult(
+                        CheckinOutcome.COUNTED if counted else CheckinOutcome.EXTRA,
+                        "词九已完成计次，材料已保存。"
+                        if counted
+                        else "词九已保存这份有效额外材料，本次不增加计次。",
+                        status,
+                    )
             except Exception:  # noqa: BLE001
                 self.logger.exception("回写异常状态失败")
             return CheckinResult(
@@ -307,28 +327,25 @@ class CheckinService:
                 SubmissionStatus.REJECTED_AI.value,
             )
 
+        target = await self.submission_repo.db.weekly_target(week_key, self.weekly_limit)
         status, _slot, week_total, reason = await self.submission_repo.finalize_counted(
             submission.id,
             user.id,
             week_key,
             beijing_date,
-            self.weekly_limit,
-            ai_fields,
+            target,
+            {**ai_fields, "updated_at": utc_iso(now_utc())},
         )
-        await self.user_repo.touch_last_submission(user.id, now_iso)
         await self._audit(user, "checkin", submission.id, status, now_iso)
 
         if status == SubmissionStatus.VALID_COUNTED.value:
-            if week_total <= 1:
-                text = T.checkin_success_first(ai_outcome.brief_feedback)
-            else:
-                text = T.checkin_success_complete(ai_outcome.brief_feedback)
+            text = T.checkin_success(ai_outcome.brief_feedback, week_total, target)
             return CheckinResult(CheckinOutcome.COUNTED, text, status, week_total)
         if reason == "same_day":
             return CheckinResult(
                 CheckinOutcome.EXTRA, T.checkin_extra_same_day(), status, week_total
             )
-        return CheckinResult(CheckinOutcome.EXTRA, T.checkin_extra(), status, week_total)
+        return CheckinResult(CheckinOutcome.EXTRA, T.checkin_extra(target), status, week_total)
 
     async def _load_previous_text(self, submission: Submission) -> str:
         if not submission.stored_path:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from dataclasses import dataclass
 
 from ..models.entities import User
@@ -40,7 +41,7 @@ class BindingService:
     def validate(self, student_id: str, name: str) -> str:
         """返回错误原因，合法时返回空字符串。"""
 
-        if not student_id or not self.student_id_pattern.match(student_id):
+        if not student_id or not self.student_id_pattern.fullmatch(student_id):
             return "学号格式不符合要求"
         if not name:
             return "姓名不能为空"
@@ -74,5 +75,17 @@ class BindingService:
         if owner:
             return BindResult(BindStatus.STUDENT_CONFLICT, user=owner)
 
-        user = await self.user_repo.create(qq_id, student_id, name, group_id, now)
+        try:
+            user = await self.user_repo.create(qq_id, student_id, name, group_id, now)
+        except sqlite3.IntegrityError:
+            existing = await self.user_repo.get_by_qq(qq_id)
+            if existing:
+                same = existing.student_id == student_id and existing.name == name
+                return BindResult(
+                    BindStatus.ALREADY_SAME if same else BindStatus.ALREADY_OTHER, user=existing
+                )
+            owner = await self.user_repo.get_by_student_id(student_id)
+            if owner:
+                return BindResult(BindStatus.STUDENT_CONFLICT, user=owner)
+            raise
         return BindResult(BindStatus.OK, user=user)

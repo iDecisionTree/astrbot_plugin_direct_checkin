@@ -1,81 +1,80 @@
-# astrbot_plugin_direct_checkin
+# 直属队学习打卡 · AstrBot 插件
 
-西北大学计算机与网络空间安全协会·软件设计直属队学习打卡 AstrBot 插件。
+西北大学计算机与网络空间安全协会软件设计直属队的 QQ 学习打卡插件。支持身份绑定、Word 归档、查重、AI 审核、每周计次、人工调整与统计导出。
 
-插件以 QQ（AstrBot `aiocqhttp` / OneBot v11）为基线，提供用户绑定、Word 学习记录归档、重复检测、AI 有效性审查、每周计次、暂停打卡、管理员维护、Excel 导出与统计。
+部署基线：Linux/Docker，AstrBot 4.16–4.x，aiocqhttp / OneBot v11。当前版本 **1.1.0**。
 
-## 功能概览
+## 计次与审核
 
-- 用户绑定学号与姓名（QQ 维度唯一）。
-- 引用 `.docx` 后发送 `/d` 打卡，文件归档到 NAS。
-- 与历史材料做文件哈希 / 文本哈希 / 相似度查重。
-- 调用当前会话聊天模型做宽松但结构化的有效性审查。
-- 北京时间自然周内最多计 2 次，超出记为有效额外材料。
-- 管理员人工计次、暂停当天/本周、恢复、导出、统计。
+- 引用 `.docx` 文件发送 `/d`。同一自然日自动计次最多一次；每周目标默认 2，可配置为 1–100。
+- 人工加次和自动打卡共享周额度；扣减释放额度，历史序号继续递增。超过日／周额度的审核通过材料另存为额外材料。
+- 本周首次确定的目标不会随配置变化；修改从下一周生效，迁移前的历史周目标统一为 2。
+- 文件或规范化正文完全重复直接拦截。高相似材料携带本人历史差异交 AI 复核；跨用户检查只传递风险提示。
+- 技术失败与内容不通过分开记录。AI 异常保留材料，可用新消息重试。
+- 写操作按平台、机器人、会话、消息 ID 去重；重复消息返回已有结果。
 
 ## 命令
 
-普通用户：
+| 命令 | 用途 |
+| --- | --- |
+| `/d <学号> <姓名>` | 首次绑定 |
+| `/d` | 引用 Word 后打卡 |
+| `/d help` | 普通帮助与当前周目标 |
+| `/d admin help` | 管理员帮助 |
+| `/d admin add <QQ>` / `/d admin remove <QQ>` | 管理员维护 |
+| `/d add <目标>` / `/d remove <目标>` | 当前周人工加／减一次 |
+| `/d skip d [原因]` / `/d skip w [原因]` | 暂停当天／本周 |
+| `/d resume` | 恢复接收；本周恢复后取消本周豁免 |
+| `/d get [目标]` | 全员／个人 Excel 报表 |
+| `/d stat` | 本周文字统计和卡片 |
+| `/d reset` | 查看重置说明 |
+| `/d reset confirm` | 同一管理员在 120 秒内用两条独立消息确认重置 |
 
-```text
-/d <学号> <名字>    首次绑定
-/d                  引用 .docx 后打卡
-/d help             普通帮助
-```
+目标支持学号、QQ，以及明确指定的 `sid:20260001`、`qq:123456789`。数字同时匹配不同用户时须加前缀。
 
-管理员：
+## 统计与 Excel
 
-```text
-/d admin add <QQ>       添加管理员
-/d admin remove <QQ>    移除管理员
-/d admin help           完整帮助
-/d add <学号/QQ>        当前周人工 +1
-/d remove <学号/QQ>     当前周人工 -1
-/d skip d [原因]        暂停当天
-/d skip w [原因]        暂停本周
-/d resume               恢复接收
-/d get [学号/QQ]        导出 Excel
-/d stat                 当前周统计
-```
+统一蓝青色统计卡片，展示日期、目标、参与人数、完成率及“已完成／进行中／未开始”。暂停周和无人时使用专门状态卡；图片失败仍返回文字。
 
-## 配置
+Excel 包含“本周总览、用户汇总、打卡明细、人工调整、暂停记录”。全员总览提供待完成名单；个人导出只含该用户的指标和记录，暂停记录为共同考核背景。
 
-插件配置见 `_conf_schema.json`，可在 AstrBot WebUI 的插件配置页修改。关键项：
+- **累计周有效计次**：各周有效净次数按该周目标封顶后求和。
+- **有效材料数**：审核通过的计次材料和额外材料数量。
+- **人工计次、人工额外、扣减**：分别记录；额外材料不能补其他周缺卡。
+- 表格含筛选、冻结、状态颜色与可展开明细列。QQ、学号及外部文本按文本写入，保留前导零并阻止公式识别。
 
-- `bootstrap_admin_qq`：初始/恢复管理员 QQ。
-- `nas_base_dir`：打卡文件根目录，必须已存在且可写（严格模式）。
-- `weekly_limit`、`max_file_size_mb`、`student_id_regex`。
-- `similarity_warn_threshold`、`similarity_high_threshold`、`history_compare_weeks`。
-- `ai_timeout_seconds`、`ai_retry_count`、`ai_max_input_chars`。
+## 安装与升级
 
-## 文档
+1. 在 AstrBot 安装插件依赖：`pip install -r requirements.txt`。
+2. 挂载并预先创建专用归档目录，例如 `/mnt/nas/direct_checkin`；设置 `nas_base_dir`。不可与其他业务共用。
+3. 设置 `bootstrap_admin_qq` 和当前会话聊天模型。完整配置及合法范围见 `_conf_schema.json`。
+4. 启动插件并在测试群验收。字体随插件分发，不依赖 Linux 系统中文字体，许可见 `assets/fonts/`。
 
-- 用户使用文档：`docs/直属队打卡_用户使用文档.md`
-- 需求与设计文档：`docs/直属队打卡_AstrBot插件需求文档.md`
+升级时保留原插件数据目录与 NAS 挂载。数据库通过事务迁移到 schema v2，迁移前在同目录生成 `*.before-v2.db` 备份；重复启动不再重放旧记录。请保留此备份。不可直接用旧版本打开已升级数据库。
 
-## 开发
+重置会清空用户、提交、调整、暂停及审计，以及 **NAS 专用目录内全部内容**，保留管理员和防重放回执。重置期间阻止新请求并等待在途处理结束；先暂存文件再提交数据库。清库失败恢复文件；清库成功但删除失败会明确提示并保留 `reset-journal.json`。重启或再次完成两次确认可继续恢复／清理，存在未解决日志时保持维护状态。不要自行删除日志、暂存区或更改 NAS 路径。
 
-依赖安装：
+维护屏障面向单个 AstrBot 插件实例；不要让多个进程同时挂载同一插件数据库和 NAS 目录。
+
+## 开发与验证
 
 ```bash
 pip install -r requirements.txt
-pip install ruff pytest
+pip install pytest ruff
+python -m pytest -q
+python -m ruff check .
+python -m ruff format --check .
+python scripts/preview_reports.py --output outputs/review
 ```
 
-代码检查与格式化：
+预览脚本仅创建临时虚构数据库，生成 PNG 和 XLSX，不连接部署数据。`outputs/` 不纳入 Git。
 
-```bash
-ruff format .
-ruff check .
-```
+自动化包含 AstrBot 接口替身；本机未安装 AstrBot，单元测试不能替代真实 Linux/Docker 和 QQ 的引用文件、模型调用、发图、发文件、重启恢复验收。
 
-运行单元测试（无需 AstrBot 运行环境）：
+## 文档
 
-```bash
-pytest -q
-```
-
-## 参考
-
-- [AstrBot](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot 插件开发文档](https://docs.astrbot.app/dev/star/plugin-new.html)
+- [用户使用文档](docs/直属队打卡_用户使用文档.md)
+- [QQ 环境测试流程](docs/直属队打卡_QQ环境测试流程.md)
+- [代码检查与改版说明](docs/代码检查与改版说明.md)
+- [需求与设计记录](docs/直属队打卡_AstrBot插件需求文档.md)
+- [AstrBot 模型调用接口](https://docs.astrbot.app/dev/star/guides/ai.html)
